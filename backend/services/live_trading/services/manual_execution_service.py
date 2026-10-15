@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import hashlib
 import json
 import logging
@@ -430,8 +431,49 @@ def _build_preview_hash(payload: dict[str, Any]) -> str:
 
 
 def _normalize_strategy_params(strategy: dict[str, Any] | None) -> dict[str, Any]:
-    params = strategy.get("parameters") if isinstance(strategy, dict) else {}
-    return params if isinstance(params, dict) else {}
+    """参数表优先，缺失值从策略代码的静态配置补齐，与托管模拟盘一致。
+
+    历史策略的 parameters 可能只有 topk，而 n_drop 写在 STRATEGY_CONFIG
+    中。不能把这种缺失当成 n_drop=0（无限制调仓）。仅解析字面量，不执行代码。
+    """
+    if not isinstance(strategy, dict):
+        return {}
+    params = strategy.get("parameters")
+    params = dict(params) if isinstance(params, dict) else {}
+    code = strategy.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return params
+    try:
+        tree = ast.parse(code)
+        for node in tree.body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if not any(
+                isinstance(target, ast.Name) and target.id == "STRATEGY_CONFIG"
+                for target in targets
+            ):
+                continue
+            config = ast.literal_eval(node.value)
+            if not isinstance(config, dict):
+                break
+            kwargs = config.get("kwargs")
+            code_params = dict(kwargs) if isinstance(kwargs, dict) else {}
+            for key in ("topk", "n_drop", "n_drop_ratio"):
+                if key in config and key not in code_params:
+                    code_params[key] = config[key]
+            return {**code_params, **params}
+    except (SyntaxError, ValueError, TypeError):
+        logger.warning("手动任务无法解析 STRATEGY_CONFIG，使用已保存参数")
+    return params
+
+
+def _resolve_n_drop(strategy_params: dict[str, Any], topk: int) -> int:
+    """兼容按比例保存的调仓限制，比例优先级与回放一致。"""
+    ratio = _to_float(strategy_params.get("n_drop_ratio"), 0.0)
+    if ratio > 0:
+        return max(1, round(topk * ratio))
+    return max(0, _to_int(strategy_params.get("n_drop"), 0))
 
 
 def _extract_fundamental_constraints(strategy_params: dict[str, Any]) -> dict[str, Any]:
@@ -509,12 +551,10 @@ def _normalize_positions(raw_positions: Any) -> dict[str, dict[str, Any]]:
         if not symbol:
             continue
         total_volume = _to_int(item.get("volume") or item.get("quantity"), 0)
-        available_volume = _to_int(
-            item.get("available_volume")
-            or item.get("available_quantity")
-            or total_volume,
-            total_volume,
-        )
+        raw_available = item.get("available_volume")
+        if raw_available is None:
+            raw_available = item.get("available_quantity")
+        available_volume = _to_int(raw_available, total_volume)
         last_price = _to_float(
             item.get("last_price") or item.get("current_price") or item.get("price"),
             0.0,
@@ -552,7 +592,7 @@ def _filter_signal_rows(
     )
     strategy_type = str(strategy_params.get("strategy_type") or "").strip().lower()
     topk = max(1, _to_int(strategy_params.get("topk"), 50))
-    n_drop = max(0, _to_int(strategy_params.get("n_drop"), 0))
+    n_drop = _resolve_n_drop(strategy_params, topk)
     current_symbols = set(current_positions.keys())
 
     explicit_buys = [
@@ -579,6 +619,14 @@ def _filter_signal_rows(
     if explicit_buys or explicit_sells:
         buy_candidates = explicit_buys[:topk]
         sell_candidates = explicit_sells
+        if strategy_type in _TOPK_STYLE_STRATEGIES and n_drop > 0:
+            sell_candidates = sorted(
+                explicit_sells,
+                key=lambda row: (
+                    _to_float(row.get("fusion_score"), float("-inf")),
+                    str(row.get("symbol") or ""),
+                ),
+            )[:n_drop]
         if (
             not explicit_sells
             and strategy_type in _TOPK_STYLE_STRATEGIES
@@ -601,6 +649,12 @@ def _filter_signal_rows(
                 }
                 for symbol in inferred_sell_symbols
             ]
+        if strategy_type in _TOPK_STYLE_STRATEGIES and current_symbols and n_drop > 0:
+            buy_candidates = [
+                row
+                for row in buy_candidates
+                if str(row.get("symbol") or "").strip().upper() not in current_symbols
+            ][: len(sell_candidates)]
     else:
         inferred = True
         ranked = sorted_rows[:topk]
@@ -628,7 +682,7 @@ def _filter_signal_rows(
         ]
         if current_symbols and n_drop > 0:
             buy_pool = buy_pool[: len(sell_candidates)]
-        buy_candidates = buy_pool if buy_pool else ranked
+        buy_candidates = buy_pool
 
     return {
         "strategy_type": strategy_type,
@@ -745,6 +799,13 @@ def _build_execution_plan_from_signals(
     sequential_budget = buy_budget
 
     raw_buy_candidates = signal_plan["buy_candidates"]
+    if positions and signal_plan["n_drop"] > 0:
+        # T+1 不可卖或缺价时没有实际卖单，不能仍按候选卖出数新增持仓。
+        if (
+            signal_plan["inferred"]
+            or signal_plan["strategy_type"] in _TOPK_STYLE_STRATEGIES
+        ):
+            raw_buy_candidates = raw_buy_candidates[: len(sell_orders)]
     valid_candidates: list[dict[str, Any]] = []
     for row in raw_buy_candidates:
         symbol = str(row.get("symbol") or "").strip().upper()

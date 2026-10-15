@@ -15,12 +15,215 @@ from backend.services.live_trading.services.manual_execution_service import (
     _manual_task_account_poll_interval_seconds,
     _manual_task_buy_cancel_timeout_seconds,
     _manual_task_wait_next_account_timeout_seconds,
+    _normalize_strategy_params,
     _parse_iso_datetime,
     _rebuild_buy_orders_with_budget,
     _resolve_board_lot_size,
     _should_request_cancel_for_buy_status,
 )
 from backend.services.live_trading.services.manual_execution_persistence import manual_execution_persistence
+
+
+def _topk_rotation_case():
+    # 45 只持仓中只有 6 只仍在 Top 50，其余 39 只跌出。
+    positions = [
+        {
+            "symbol": f"{600000 + i}.SH",
+            "volume": 1000,
+            "available_volume": 1000,
+            "last_price": 10.0,
+            "market_value": 10_000.0,
+        }
+        for i in range(45)
+    ]
+    target_symbols = [p["symbol"] for p in positions[:6]] + [
+        f"{601000 + i}.SH" for i in range(44)
+    ]
+    signal_rows = [
+        {"symbol": symbol, "fusion_score": 1 - i / 100, "expected_price": 10.0}
+        for i, symbol in enumerate(target_symbols)
+    ] + [
+        {"symbol": p["symbol"], "fusion_score": -i, "expected_price": 10.0}
+        for i, p in enumerate(positions[6:])
+    ]
+    return signal_rows, {"available_cash": 119_057.68, "positions": positions}
+
+
+@pytest.mark.parametrize("explicit_buys", [False, True])
+def test_manual_topk_reads_code_dropout_and_limits_rotation(explicit_buys):
+    rows, account = _topk_rotation_case()
+    if explicit_buys:
+        for row in rows[:50]:
+            row["signal_side"] = "BUY"
+    strategy = {
+        "parameters": {"strategy_type": "standard_topk", "topk": 50},
+        "code": "STRATEGY_CONFIG = {'class': 'RedisTopkStrategy', "
+        "'kwargs': {'signal': '<PRED>', 'topk': 50, 'n_drop': 10}}",
+    }
+    params = _normalize_strategy_params(strategy)
+    plan = _build_execution_plan_from_signals(
+        signal_rows=rows, strategy_params=params, account_snapshot=account
+    )
+    assert params["n_drop"] == 10
+    assert "n_drop" not in strategy["parameters"]
+    assert plan["summary"]["n_drop"] == 10
+    assert len(plan["sell_orders"]) == 10
+    assert len(plan["buy_orders"]) == 10
+    # 卖出分数最低的 10 只，保留其余 35 只。
+    assert {order["symbol"] for order in plan["sell_orders"]} == {
+        p["symbol"] for p in account["positions"][-10:]
+    }
+
+
+@pytest.mark.parametrize("n_drop", [0, 4])
+def test_manual_topk_saved_dropout_overrides_code(n_drop):
+    params = _normalize_strategy_params(
+        {
+            "parameters": {
+                "strategy_type": "standard_topk",
+                "topk": 50,
+                "n_drop": n_drop,
+            },
+            "code": "STRATEGY_CONFIG: dict = {'kwargs': {'topk': 50, 'n_drop': 10}}",
+        }
+    )
+    assert params["n_drop"] == n_drop
+
+
+def test_manual_topk_resolves_ratio_before_explicit_count():
+    rows, account = _topk_rotation_case()
+    plan = _build_execution_plan_from_signals(
+        signal_rows=rows,
+        strategy_params={
+            "strategy_type": "standard_topk",
+            "topk": 50,
+            "n_drop": 30,
+            "n_drop_ratio": 0.2,
+        },
+        account_snapshot=account,
+    )
+    assert plan["summary"]["n_drop"] == 10
+    assert len(plan["sell_orders"]) == len(plan["buy_orders"]) == 10
+
+
+def test_manual_topk_limits_explicit_sell_signals():
+    rows, account = _topk_rotation_case()
+    for row in rows[:50]:
+        row["signal_side"] = "BUY"
+    for row in rows[50:]:
+        row["signal_side"] = "SELL"
+    plan = _build_execution_plan_from_signals(
+        signal_rows=rows,
+        strategy_params={"strategy_type": "standard_topk", "topk": 50, "n_drop": 10},
+        account_snapshot=account,
+    )
+    assert len(plan["sell_orders"]) == len(plan["buy_orders"]) == 10
+
+
+def test_manual_topk_does_not_buy_when_dropout_sells_are_unavailable():
+    rows, account = _topk_rotation_case()
+    for position in account["positions"]:
+        position["available_volume"] = 0
+    plan = _build_execution_plan_from_signals(
+        signal_rows=rows,
+        strategy_params={"strategy_type": "standard_topk", "topk": 50, "n_drop": 10},
+        account_snapshot=account,
+    )
+    assert plan["sell_orders"] == []
+    assert plan["buy_orders"] == []
+    assert len(plan["skipped_items"]) == 10
+
+
+def test_manual_topk_initial_purchase_is_not_limited_to_dropout_count():
+    rows, _ = _topk_rotation_case()
+    plan = _build_execution_plan_from_signals(
+        signal_rows=rows,
+        strategy_params={"strategy_type": "standard_topk", "topk": 50, "n_drop": 10},
+        account_snapshot={"available_cash": 1_000_000.0, "positions": []},
+    )
+    assert plan["sell_orders"] == []
+    assert len(plan["buy_orders"]) == 50
+
+
+def test_manual_topk_does_not_buy_when_existing_topk_holdings_are_unchanged():
+    rows, account = _topk_rotation_case()
+    account["positions"] = account["positions"][:6]
+    plan = _build_execution_plan_from_signals(
+        signal_rows=rows,
+        strategy_params={"strategy_type": "standard_topk", "topk": 50, "n_drop": 10},
+        account_snapshot=account,
+    )
+    assert plan["sell_orders"] == []
+    assert plan["buy_orders"] == []
+
+
+def test_manual_strategy_config_is_parsed_without_executing_code():
+    params = _normalize_strategy_params(
+        {
+            "parameters": {"topk": 50},
+            "code": "raise RuntimeError('must not execute')\n"
+            "STRATEGY_CONFIG = {'kwargs': {'n_drop': 10}}",
+        }
+    )
+    assert params == {"topk": 50, "n_drop": 10}
+
+
+@pytest.mark.asyncio
+async def test_manual_preview_uses_code_limit_and_rejects_previous_uncapped_hash():
+    rows, account = _topk_rotation_case()
+    strategy = {
+        "parameters": {"strategy_type": "standard_topk", "topk": 50},
+        "code": "STRATEGY_CONFIG = {'kwargs': {'topk': 50, 'n_drop': 10}}",
+    }
+    service = ManualExecutionService()
+    service.prepare_manual_execution = AsyncMock(
+        return_value=PreparedManualExecution(
+            task_id="",
+            tenant_id="default",
+            user_id="10000001",
+            strategy_id="12",
+            strategy_name="默认 Top-K 选股策略",
+            run_id="run-topk",
+            model_id="model-topk",
+            prediction_trade_date=date(2026, 10, 16),
+            trading_mode="SIMULATION",
+            request_payload={},
+            run={},
+            strategy=strategy,
+        )
+    )
+    service._load_simulation_account_snapshot = AsyncMock(return_value=account)
+    service._load_signal_rows = AsyncMock(return_value=rows)
+    service._persist_task = AsyncMock()
+    args = {
+        "tenant_id": "default",
+        "user_id": "10000001",
+        "model_id": "model-topk",
+        "run_id": "run-topk",
+        "strategy_id": "12",
+        "trading_mode": "SIMULATION",
+    }
+    preview = await service.build_execution_preview(**args)
+    assert preview["strategy_context"]["strategy_params"]["n_drop"] == 10
+    assert len(preview["sell_orders"]) == len(preview["buy_orders"]) == 10
+
+    # 模拟修复前仅使用 parameters 生成的 39 卖 / 44 买预案。
+    old_plan = _build_execution_plan_from_signals(
+        signal_rows=rows,
+        strategy_params=strategy["parameters"],
+        account_snapshot=account,
+    )
+    assert len(old_plan["sell_orders"]) == 39
+    assert len(old_plan["buy_orders"]) == 44
+    old_context = {
+        **preview["strategy_context"],
+        "strategy_params": strategy["parameters"],
+    }
+    old_hash = _build_preview_hash({**old_plan, "strategy_context": old_context})
+    with pytest.raises(HTTPException) as exc_info:
+        await service.submit_execution_plan(**args, preview_hash=old_hash)
+    assert exc_info.value.status_code == 409
+    service._persist_task.assert_not_awaited()
 
 
 def test_build_execution_plan_from_signals_generates_sell_and_buy_orders():
