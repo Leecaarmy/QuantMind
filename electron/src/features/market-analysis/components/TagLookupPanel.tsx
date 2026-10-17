@@ -42,7 +42,8 @@ interface TagStockItem {
 
 const MISSING = <span className="font-mono text-xs text-slate-300">—</span>;
 
-export const TagLookupPanel: React.FC = () => {
+export const TagLookupPanel: React.FC<{ date?: string }> = ({ date }) => {
+  const dateQuery = date ? `&date=${encodeURIComponent(date)}` : '';
   const [perspective, setPerspective] = useState<'stock' | 'sector'>('stock');
   const [sectorFilter, setSectorFilter] = useState<string>('全部');
   const [searchQuery, setSearchQuery] = useState('600000.SH');
@@ -61,7 +62,7 @@ export const TagLookupPanel: React.FC = () => {
     setStatsLoading(true);
     try {
       const token = localStorage.getItem('access_token') || '';
-      const res = await fetch(`${MARKET_ANALYSIS_API}/tags/stats?limit=30`, {
+      const res = await fetch(`${MARKET_ANALYSIS_API}/tags/stats?limit=30${dateQuery}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -83,7 +84,7 @@ export const TagLookupPanel: React.FC = () => {
     setLoading(true);
     try {
       const token = localStorage.getItem('access_token') || '';
-      const res = await fetch(`${MARKET_ANALYSIS_API}/tags/by-stock?symbol=${encodeURIComponent(q)}`, {
+      const res = await fetch(`${MARKET_ANALYSIS_API}/tags/by-stock?symbol=${encodeURIComponent(q)}${dateQuery}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -107,7 +108,7 @@ export const TagLookupPanel: React.FC = () => {
     setLoading(true);
     try {
       const token = localStorage.getItem('access_token') || '';
-      const res = await fetch(`${MARKET_ANALYSIS_API}/tags/by-tag?tag=${encodeURIComponent(q)}&limit=50`, {
+      const res = await fetch(`${MARKET_ANALYSIS_API}/tags/by-tag?tag=${encodeURIComponent(q)}&limit=50${dateQuery}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {

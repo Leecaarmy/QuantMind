@@ -15,6 +15,15 @@ import { PAGE_LAYOUT } from '../../../config/pageLayout';
 
 const MARKET_ANALYSIS_API = `${SERVICE_ENDPOINTS.USER_SERVICE}/market-analysis`;
 
+// 显式历史日期始终读取快照，不能同时跳过快照。
+const buildQS = (date?: string, realtime = false) => {
+  const params = new URLSearchParams();
+  if (date) params.set('date', date);
+  else if (realtime) params.set('realtime', '1');
+  const query = params.toString();
+  return query ? `?${query}` : '';
+};
+
 interface MarketBreadthData {
   trade_date: string;
   advance_count: number;
@@ -58,31 +67,33 @@ export const MarketAnalysisPage: React.FC = () => {
   const [snapDates, setSnapDates] = useState<string[]>([]);
   // 🎯 手动分析完成后切换为实时模式（GET 接口跳过快照，展示最新交易日数据）
   const [realtime, setRealtime] = useState(false);
+  const [refreshVersion, setRefreshVersion] = useState(0);
 
-  useEffect(() => {
-    fetchMarketData();
-  }, []);
+  const selectSnapshotDate = (date?: string) => {
+    setRealtime(false);
+    setSnapDate(date);
+  };
 
-  // 统一 QS 构造：避免无 date 时出现 &realtime=1 导致 404（/overview&realtime=1）
-  const buildQS = (date?: string, rt?: boolean) => {
-    const p = new URLSearchParams();
-    if (date) p.set('date', date);
-    if (rt) p.set('realtime', '1');
-    const s = p.toString();
-    return s ? `?${s}` : '';
+  const refreshRealtimeData = () => {
+    setSnapDate(undefined);
+    setRealtime(true);
+    setRefreshVersion(refreshVersion + 1);
   };
 
   // 矩形树图数据：随分类模式切换拉取对应热力图
   useEffect(() => {
     if (activeTab !== 'flow-bar' || chartViewMode !== 'treemap') return;
+    const controller = new AbortController();
+    setTreemapData([]);
     const token = localStorage.getItem('access_token') || '';
     const qs = buildQS(snapDate, realtime);
     const suffix = qs ? qs.replace('?', '&') : '';
-    fetch(`${MARKET_ANALYSIS_API}/heatmap?category=${categoryMode}${suffix}`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`${MARKET_ANALYSIS_API}/heatmap?category=${categoryMode}${suffix}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
       .then((res) => (res.ok ? res.json() : null))
-      .then((d) => setTreemapData(d?.items && d.items.length > 0 ? d.items : []))
-      .catch(() => setTreemapData([]));
-  }, [activeTab, chartViewMode, categoryMode, snapDate, realtime]);
+      .then((d) => { if (!controller.signal.aborted) setTreemapData(Array.isArray(d?.items) ? d.items : []); })
+      .catch(() => { if (!controller.signal.aborted) setTreemapData([]); });
+    return () => controller.abort();
+  }, [activeTab, chartViewMode, categoryMode, snapDate, realtime, refreshVersion]);
 
   // 加载可用快照日期 + 快照模式；切换日期重取
   useEffect(() => {
@@ -93,89 +104,78 @@ export const MarketAnalysisPage: React.FC = () => {
       .then((d) => {
         if (!cancelled && d && Array.isArray(d.dates)) {
           setSnapDates(d.dates);
-          if (!snapDate && d.latest) setSnapDate(undefined); // 默认最新（latest）
         }
       })
       .catch(() => {});
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    fetchMarketData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapDate]);
+    const controller = new AbortController();
+    const { signal } = controller;
+    setIndices([]);
+    setStockFlows([]);
+    setBreadth(null);
+    setDataDate('');
+    setHeatmapData([]);
+    setSankeyData(null);
+    setUpdateTime('');
+    setSelectedFlowItem(null);
+    setFocusStock(null);
+    const fetchMarketData = async () => {
+      setLoading(true);
+      const token = localStorage.getItem('access_token') || '';
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const qs = buildQS(snapDate, realtime);
+      const qsWithAmp = qs ? qs.replace('?', '&') : '';
 
-  const fetchMarketData = async (forceRealtime?: boolean) => {
-    setLoading(true);
-    const token = localStorage.getItem('access_token') || '';
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const useRealtime = forceRealtime !== undefined ? forceRealtime : realtime;
-    const qs = buildQS(snapDate, useRealtime);
-    const qsWithAmp = qs ? qs.replace('?', '&') : '';
+      try {
+        const [idxData, stockData, bData, hData, sData] = await Promise.all([
+          `/indices/overview${qs}`,
+          `/money-flow/stocks?limit=20${qsWithAmp}`,
+          `/breadth${qs}`,
+          `/heatmap?category=shenwan${qsWithAmp}`,
+          `/money-flow/sankey${qs}`,
+        ].map(async (path) => {
+          const res = await fetch(`${MARKET_ANALYSIS_API}${path}`, { headers, signal });
+          if (!res.ok) throw new Error(`市场分析请求失败: ${res.status}`);
+          return res.json();
+        }));
+        if (signal.aborted) return;
+        setIndices(Array.isArray(idxData) ? idxData : []);
+        setStockFlows(Array.isArray(stockData) ? stockData : []);
+        setDataDate(bData?.trade_date || snapDate || '');
+        setBreadth(bData?.total_turnover_yi > 0 ? bData : null);
+        setHeatmapData(Array.isArray(hData?.items) ? hData.items : []);
+        setSankeyData(sData?.nodes?.length > 0 ? sData : null);
 
-    try {
-      const [resIdx, resStock, resBreadth, resHeatmap, resSankey] = await Promise.all([
-        fetch(`${MARKET_ANALYSIS_API}/indices/overview${qs}`, { headers }),
-        fetch(`${MARKET_ANALYSIS_API}/money-flow/stocks?limit=20${qsWithAmp}`, { headers }),
-        fetch(`${MARKET_ANALYSIS_API}/breadth${qs}`, { headers }),
-        fetch(`${MARKET_ANALYSIS_API}/heatmap?category=shenwan${qsWithAmp}`, { headers }),
-        fetch(`${MARKET_ANALYSIS_API}/money-flow/sankey${qs}`, { headers }),
-      ]);
-
-      if (resIdx.ok) {
-        const idxData = await resIdx.json();
-        if (Array.isArray(idxData) && idxData.length > 0) {
-          setIndices(idxData);
-        }
+        const now = new Date();
+        setUpdateTime(now.toTimeString().split(' ')[0]);
+      } catch (e) {
+        if (!signal.aborted) console.warn('后端市场接口连接出现异常', e);
+      } finally {
+        if (!signal.aborted) setLoading(false);
       }
-      if (resStock.ok) {
-        const stockData = await resStock.json();
-        if (Array.isArray(stockData) && stockData.length > 0) {
-          setStockFlows(stockData);
-        }
-      }
-      if (resBreadth.ok) {
-        const bData = await resBreadth.json();
-        setDataDate(bData?.trade_date || '');
-        if (bData && bData.total_turnover_yi > 0) {
-          setBreadth(bData);
-        }
-      }
-      if (resHeatmap.ok) {
-        const hData = await resHeatmap.json();
-        if (hData && Array.isArray(hData.items) && hData.items.length > 0) {
-          setHeatmapData(hData.items);
-        }
-      }
-      if (resSankey.ok) {
-        const sData = await resSankey.json();
-        if (sData && sData.nodes && sData.nodes.length > 0) {
-          setSankeyData(sData);
-        }
-      }
-
-      const now = new Date();
-      setUpdateTime(now.toTimeString().split(' ')[0]);
-    } catch (e) {
-      console.warn('后端市场接口连接出现异常，保留现有渲染状态', e);
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+    void fetchMarketData();
+    return () => controller.abort();
+  }, [snapDate, realtime, refreshVersion]);
 
   // 🎯 全市场个股资金流（供全局搜索本地过滤，不触发服务端计算）
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
+    setAllStocks([]);
     const token = localStorage.getItem('access_token') || '';
-    fetch(`${MARKET_ANALYSIS_API}/money-flow/stocks/full${realtime ? '?realtime=1' : ''}`, {
+    fetch(`${MARKET_ANALYSIS_API}/money-flow/stocks/full${buildQS(snapDate, realtime)}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
+      signal: controller.signal,
     })
       .then((res) => (res.ok ? res.json() : null))
       .then((d) => { if (!cancelled && Array.isArray(d)) setAllStocks(d); })
       .catch(() => {});
-    return () => { cancelled = true; };
-  }, [realtime]);
+    return () => { cancelled = true; controller.abort(); };
+  }, [snapDate, realtime, refreshVersion]);
 
   // 本地过滤搜索结果（名称/代码子串）
   const searchResults = useMemo(() => {
@@ -243,7 +243,7 @@ export const MarketAnalysisPage: React.FC = () => {
 
       if (!res.ok || !res.body) {
         message.info('已触发市场分析');
-        await fetchMarketData(true);
+        refreshRealtimeData();
         return;
       }
 
@@ -317,9 +317,7 @@ export const MarketAnalysisPage: React.FC = () => {
       }
       message.success('市场分析完成，已同步 QuantDB 最新数据');
       // 手动分析后强制实时重拉所有面板（跳过快照），确保各 tab 展示最新交易日数据
-      setSnapDate(undefined);
-      setRealtime(true);
-      await fetchMarketData(true);
+      refreshRealtimeData();
     } catch (e) {
       console.error('市场分析触发失败:', e);
       message.error('触发市场分析失败，请检查后端服务状态');
@@ -406,7 +404,8 @@ export const MarketAnalysisPage: React.FC = () => {
               <DatePicker
                 allowClear
                 value={snapDate ? dayjs(snapDate) : null}
-                onChange={(d) => setSnapDate(d ? d.format('YYYY-MM-DD') : undefined)}
+                onChange={(d) => selectSnapshotDate(d ? d.format('YYYY-MM-DD') : undefined)}
+                disabled={analyzing}
                 disabledDate={(d) => (snapDates.length > 0 ? !snapDates.includes(d.format('YYYY-MM-DD')) : false)}
                 placeholder="快照日期(默认最新)"
                 className="!w-36 sm:!w-40"
@@ -414,7 +413,7 @@ export const MarketAnalysisPage: React.FC = () => {
                 suffixIcon={<Clock className="w-3 h-3 text-purple-400" />}
               />
               {snapDate && (
-                <span className="text-[11px] text-slate-400 cursor-pointer hover:text-purple-600 whitespace-nowrap" onClick={() => setSnapDate(undefined)}>
+                <span className="text-[11px] text-slate-400 cursor-pointer hover:text-purple-600 whitespace-nowrap" onClick={() => { if (!analyzing) selectSnapshotDate(); }}>
                   最新
                 </span>
               )}
@@ -616,6 +615,8 @@ export const MarketAnalysisPage: React.FC = () => {
 
               {chartViewMode === 'bar' ? (
                 <CapitalFlowHorizontalBarChart
+                  key={refreshVersion}
+                  date={snapDate}
                   period={period}
                   dimension={flowDimension}
                   categoryMode={categoryMode}
@@ -709,8 +710,9 @@ export const MarketAnalysisPage: React.FC = () => {
       {/* ── 原有其他页面内容维持完备 ── */}
       {activeTab === 'panorama' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-stretch flex-1 min-h-0 overflow-hidden">
-          <div className="lg:col-span-5 flex flex-col justify-between gap-3 min-h-0">
+          <div className="lg:col-span-5 flex flex-col gap-3 min-h-0 overflow-y-auto">
             <MarketBreadthCard
+              className="grow shrink-0 justify-between"
               advanceCount={breadth?.advance_count}
               declineCount={breadth?.decline_count}
               flatCount={breadth?.flat_count}
@@ -720,7 +722,7 @@ export const MarketAnalysisPage: React.FC = () => {
               profitEffect={breadth?.profit_effect}
               limitUpBrokenRatio={breadth?.limit_up_broken_ratio}
             />
-            <div className="flex flex-col gap-2 bg-white/95 backdrop-blur-md rounded-2xl p-3.5 border border-purple-100/80 shadow-md shadow-purple-500/5 min-h-0 flex-1 justify-between">
+            <div className="flex flex-col gap-2 bg-white/95 backdrop-blur-md rounded-2xl p-3.5 border border-purple-100/80 shadow-md shadow-purple-500/5 shrink-0">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
                   <TrendingUp className="w-3.5 h-3.5 text-purple-600" />
@@ -819,7 +821,7 @@ export const MarketAnalysisPage: React.FC = () => {
 
           {activeTab === 'tag-lookup' && (
             <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-              <TagLookupPanel />
+              <TagLookupPanel key={snapDate || 'latest'} date={snapDate} />
             </div>
           )}
         </div>

@@ -19,6 +19,7 @@ export interface FlowItem {
 }
 
 interface CapitalFlowHorizontalBarChartProps {
+  date?: string;
   period?: '1d' | '3d' | '5d' | '10d' | '20d';
   dimension?: 'sector' | 'stock';
   categoryMode?: 'shenwan' | 'concept';
@@ -31,6 +32,7 @@ interface CapitalFlowHorizontalBarChartProps {
 }
 
 export const CapitalFlowHorizontalBarChart: React.FC<CapitalFlowHorizontalBarChartProps> = ({
+  date,
   period = '5d',
   dimension = 'sector',
   categoryMode = 'shenwan',
@@ -46,36 +48,47 @@ export const CapitalFlowHorizontalBarChart: React.FC<CapitalFlowHorizontalBarCha
 
   // 1. 数据请求
   useEffect(() => {
-    fetchData();
-  }, [period, dimension, categoryMode, realtime]);
-
-  const fetchData = async () => {
-    setLoading(true);
-    try {
-      const token = localStorage.getItem('access_token') || '';
-      const res = await fetch(
-        `${MARKET_ANALYSIS_API}/money-flow/period?period=${period}&dimension=${dimension}&category=${categoryMode}&limit=80${realtime ? '&realtime=1' : ''}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (res.ok) {
-        const json = await res.json();
-        if (json.items && json.items.length > 0) {
-          setData(json.items);
-          setLoading(false);
-          return;
-        }
-      }
-    } catch (e) {
-      console.warn('资金流向接口请求异常', e);
-    }
-
+    const controller = new AbortController();
+    const { signal } = controller;
     setData([]);
-    setLoading(false);
-  };
+    const fetchData = async () => {
+      setLoading(true);
+      try {
+        const token = localStorage.getItem('access_token') || '';
+        const params = new URLSearchParams({ period, dimension, category: categoryMode, limit: '80' });
+        if (date) params.set('date', date);
+        else if (realtime) params.set('realtime', '1');
+        const res = await fetch(
+          `${MARKET_ANALYSIS_API}/money-flow/period?${params}`,
+          { headers: { Authorization: `Bearer ${token}` }, signal }
+        );
+        const json = res.ok ? await res.json() : null;
+        if (!signal.aborted) setData(Array.isArray(json?.items) ? json.items : []);
+      } catch (e) {
+        if (!signal.aborted) {
+          console.warn('资金流向接口请求异常', e);
+          setData([]);
+        }
+      } finally {
+        if (!signal.aborted) setLoading(false);
+      }
+    };
+    void fetchData();
+    return () => controller.abort();
+  }, [period, dimension, categoryMode, date, realtime]);
+
+  useEffect(() => () => {
+    instanceRef.current?.dispose();
+    instanceRef.current = null;
+  }, []);
 
   // 2. 渲染 ECharts 横向柱状图
   useEffect(() => {
-    if (!chartRef.current || data.length === 0) return;
+    if (!chartRef.current) return;
+    if (data.length === 0) {
+      instanceRef.current?.clear();
+      return;
+    }
 
     if (!instanceRef.current) {
       instanceRef.current = echarts.init(chartRef.current);
@@ -283,12 +296,11 @@ export const CapitalFlowHorizontalBarChart: React.FC<CapitalFlowHorizontalBarCha
         >
           暂无资金流向数据
         </div>
-      ) : (
-        // 🎯 内部纵向滚动：可视高度固定 height，内容按条数撑高，超出在图表内滚动看全 80 个行业
-        <div style={{ width: '100%', maxHeight: typeof height === 'number' ? `${height}px` : height, overflowY: 'auto', overflowX: 'hidden' }}>
-          <div ref={chartRef} style={{ width: '100%', height: `${Math.max((data.length || 1) * 40, 320) + 140}px` }} />
-        </div>
-      )}
+      ) : null}
+      {/* 保持画布挂载，空结果后再次切换日期也能正常绘图。 */}
+      <div style={{ display: data.length === 0 && !loading ? 'none' : undefined, width: '100%', maxHeight: typeof height === 'number' ? `${height}px` : height, overflowY: 'auto', overflowX: 'hidden' }}>
+        <div ref={chartRef} style={{ width: '100%', height: `${Math.max((data.length || 1) * 40, 320) + 140}px` }} />
+      </div>
       {loading && (
         <div className="absolute inset-0 bg-white/60 backdrop-blur-xs flex items-center justify-center rounded-2xl">
           <span className="text-xs text-purple-600 font-bold animate-pulse">数据加载中...</span>

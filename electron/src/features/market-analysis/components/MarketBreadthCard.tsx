@@ -2,6 +2,7 @@ import React from 'react';
 import { Flame, ShieldAlert, TrendingUp, TrendingDown, Layers } from 'lucide-react';
 
 interface MarketBreadthCardProps {
+  className?: string;
   advanceCount?: number;
   declineCount?: number;
   flatCount?: number;
@@ -13,6 +14,7 @@ interface MarketBreadthCardProps {
 }
 
 export const MarketBreadthCard: React.FC<MarketBreadthCardProps> = ({
+  className = '',
   advanceCount = 3120,
   declineCount = 1850,
   flatCount = 380,
@@ -28,7 +30,7 @@ export const MarketBreadthCard: React.FC<MarketBreadthCardProps> = ({
   const flatPct = Math.max(0, 100 - advPct - decPct);
 
   return (
-    <div className="bg-white/90 backdrop-blur-md rounded-2xl p-4 border border-slate-200/80 shadow-sm flex flex-col gap-3">
+    <div className={`bg-white/90 backdrop-blur-md rounded-2xl p-4 border border-slate-200/80 shadow-sm flex flex-col gap-3 ${className}`}>
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
           <Flame className="w-3.5 h-3.5 text-purple-600" />
