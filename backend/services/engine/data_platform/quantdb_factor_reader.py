@@ -127,6 +127,47 @@ def market_data_dir(market: str | None = None) -> Path:
 
 KEY_COLUMNS = {"symbol", "date", "dt", "time", "release_id", "published_at"}
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_CN_SUFFIX_RE = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
+_CN_PREFIX_RE = re.compile(r"^(SH|SZ|BJ)\d{6}$")
+_CN_BARE_RE = re.compile(r"^\d{6}$")
+# 非 CN 市场兜底：仅允许安全字符（字母数字与 ._: -），配合绑定参数杜绝注入。
+_GENERIC_SYMBOL_RE = re.compile(r"^[A-Z0-9_.:\-]{1,32}$")
+# SQL IN 列表上限：csi 全成分 + 前后缀双口径膨胀后仍有余量，超限直接拒绝而非截断。
+_MAX_POOL_SQL_VALUES = 10000
+
+
+def pool_sql_values(pool_symbols: list[str] | None) -> list[str]:
+    """池成分 → SQL `IN` 白名单（大写，前后缀双口径）。
+
+    QuantDB 各分区存储的 symbol 可能是后缀式（600036.SH）也可能是前缀式
+    （SH600036），读时统一 `UPPER(symbol)` 比对，所以两个口径都要进 IN 列表。
+    非 CN 形状且字符安全的原样收录（HK/US 等）；其余脏输入丢弃（零命中，
+    由上游 loading 的空结果报错兜底）。
+    """
+    if not pool_symbols:
+        return []
+    values: set[str] = set()
+    for raw in pool_symbols:
+        s = str(raw or "").strip().upper()
+        if not s:
+            continue
+        if _CN_SUFFIX_RE.fullmatch(s):
+            values.add(s)
+            values.add(StockCodeUtil.to_prefix(s))
+        elif _CN_PREFIX_RE.fullmatch(s):
+            values.add(s)
+            values.add(StockCodeUtil.to_suffix(s))
+        elif _CN_BARE_RE.fullmatch(s):
+            values.add(StockCodeUtil.to_suffix(s))
+            values.add(StockCodeUtil.to_prefix(s))
+        elif _GENERIC_SYMBOL_RE.fullmatch(s):
+            values.add(s)
+    if len(values) > _MAX_POOL_SQL_VALUES:
+        raise QuantDBFactorError(
+            f"pool_symbols 展开后 {len(values)} 个 SQL 值，超过上限 "
+            f"{_MAX_POOL_SQL_VALUES}，拒绝下推（请拆小池）"
+        )
+    return sorted(values)
 
 
 class QuantDBFactorError(RuntimeError):
@@ -456,8 +497,14 @@ class QuantDBFactorReader:
         start: str | date,
         end: str | date,
         include_ohlcv: bool = True,
+        pool_symbols: list[str] | None = None,
     ) -> pd.DataFrame:
-        """Project raw source columns for a date range into an in-memory DataFrame."""
+        """Project raw source columns for a date range into an in-memory DataFrame.
+
+        `pool_symbols` 非空时把过滤下推到 DuckDB（`UPPER(symbol) IN (...)`），
+        避免全市场物化后再由 pandas 过滤——10 年窗口 × 40+ 列在小内存主机上
+        会直接把整机拖进 swap。读出后上游仍可做 pandas 二次确认。
+        """
         status = self.assert_ready(source, start=start, end=end)
         available = set(status.columns)
         requested = list(dict.fromkeys(features))
@@ -517,6 +564,13 @@ class QuantDBFactorReader:
             for feature, source_column in source_columns.items()
         )
         start_s, end_s = str(start)[:10], str(end)[:10]
+        pool_values = pool_sql_values(pool_symbols)
+        if pool_symbols and not pool_values:
+            # 池非空但无一合法：不能退化成全市场（会训出“以为是池内实际全市场”
+            # 的模型），直接 fail fast，上游 loading 的空结果报错是第二道网。
+            raise QuantDBFactorError(
+                "pool_symbols 非空但无法解析出任何有效代码，拒绝全市场读取"
+            )
 
         duckdb = self._duckdb()
         con = duckdb.connect(config={"memory_limit": "8GB", "threads": "4"})
@@ -535,8 +589,19 @@ class QuantDBFactorReader:
                 f"SELECT {', '.join(selected)} FROM {from_clause} "
                 f"WHERE {date_expr} BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)"
             )
-            logger.info("QuantDB DuckDB scanning %s from %s to %s", source, start_s, end_s)
-            frame = con.execute(sql, [start_s, end_s]).fetchdf()
+            params: list[str] = [start_s, end_s]
+            if pool_values:
+                # 存储口径可能是前缀也可能是后缀，统一 UPPER 比对双口径集合。
+                placeholders = ", ".join(["?"] * len(pool_values))
+                sql += f' AND UPPER(f."symbol") IN ({placeholders})'
+                params.extend(pool_values)
+            logger.info(
+                "QuantDB DuckDB scanning %s from %s to %s%s",
+                source, start_s, end_s,
+                f" (pool pushdown: {len(pool_symbols or [])} symbols)"
+                if pool_values else "",
+            )
+            frame = con.execute(sql, params).fetchdf()
             logger.info("QuantDB DuckDB returned %d rows for %s", len(frame), source)
         finally:
             con.close()
@@ -562,6 +627,7 @@ class QuantDBFactorReader:
         features: list[str],
         trade_date: str | date,
         feature_sources: dict[str, str] | None = None,
+        pool_symbols: list[str] | None = None,
     ) -> pd.DataFrame:
         return self.read_range(
             source,
@@ -569,6 +635,7 @@ class QuantDBFactorReader:
             feature_sources=feature_sources,
             start=trade_date,
             end=trade_date,
+            pool_symbols=pool_symbols,
         )
 
     def available_dates(

@@ -268,6 +268,11 @@ def load_data(
             feature_sources=factor_field_sources,
             start=range_start.date(),
             end=range_end.date(),
+            # 池下推到 DuckDB（UPPER(symbol) IN (...)）：池任务不再全市场物化，
+            # 小内存主机上这是内存峰值的主因。读出后下方仍做 pandas 二次确认。
+            pool_symbols=pool_symbols
+            if (pool_symbols and market_upper == "CN")
+            else None,
         )
         logger.info(
             "Direct QuantDB factor source %s: %d rows, %s to %s",
@@ -276,11 +281,11 @@ def load_data(
             df["trade_date"].min() if not df.empty else "N/A",
             df["trade_date"].max() if not df.empty else "N/A",
         )
-        # 池尽早过滤（P3）：直读返回全市场（1053 万行），114 列 float64 在
-        # 后续复制展开期峰值会触发容器 mem_limit（Exit 137）；池内成分先过滤，
-        # 后续 downcast/漂移/标签全量受益。直读 symbol 经 QuantDBFactorReader
-        # 归一为后缀式（600036.SH），老数据可能仍是前缀式，此处必须双口径匹配，
-        # 与函数末尾全局池过滤保持一致；单用前缀集合会零命中误杀。
+        # 池尽早过滤（P3）：SQL 侧已按池预过滤（见 read_range pool_symbols 下推）——
+        # 否则直读返回全市场（1053 万行 × 114 列 float64），在复制展开期峰值会
+        # 触发容器 mem_limit（Exit 137），小内存主机直接被拖进 swap。
+        # 此处为 pandas 二次确认（双口径匹配，与函数末尾全局池过滤保持一致），
+        # 开销已忽略不计。零命中仍直接报错，避免静默错配。
         if pool_symbols and market_upper == "CN" and "symbol" in df.columns:
             _pool_clean = [s for s in pool_symbols if str(s).strip()]
             _wanted_prefix = {_to_prefix_symbol(s) for s in _pool_clean}

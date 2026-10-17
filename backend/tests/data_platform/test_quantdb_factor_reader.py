@@ -53,7 +53,7 @@ def test_reads_single_source_with_logical_field_alias(tmp_path):
         trade_date="2024-01-02",
     )
 
-    assert set(data["symbol"]) == {"SH600001", "SZ000001"}
+    assert set(data["symbol"]) == {"600001.SH", "000001.SZ"}
     assert data["alpha"].tolist() == [0.1, 0.2]
 
 
@@ -81,10 +81,69 @@ def test_forward_labels_use_future_close_without_snapshot(tmp_path):
     )
     labels = reader.forward_labels(frame, horizon=1, signal_lag_days=0)
     first = labels[
-        (labels["symbol"] == "SH600001")
+        (labels["symbol"] == "600001.SH")
         & (labels["trade_date"] == pd.Timestamp("2024-01-02"))
     ]
     assert first.iloc[0]["label"] == pytest.approx(0.1)
+
+
+# ── 池下推：read_range(pool_symbols=...) 在 SQL 层过滤 ──────────────────────
+
+
+def test_read_range_pool_symbols_pushdown_suffix_storage(tmp_path):
+    """存储为后缀式时，后缀/前缀/裸码三种池口径都要命中；未知池返回空。"""
+    _write_factor_partition(
+        tmp_path, "l1_factors", _frame("2024-01-02", 10), "20240102"
+    )
+    reader = QuantDBFactorReader(tmp_path)
+    kwargs = {"features": ["l1_alpha"], "start": "2024-01-02", "end": "2024-01-02"}
+
+    assert set(
+        reader.read_range("l1_factors", **kwargs, pool_symbols=["600001.SH"])["symbol"]
+    ) == {"600001.SH"}
+    assert set(
+        reader.read_range("l1_factors", **kwargs, pool_symbols=["SH600001"])["symbol"]
+    ) == {"600001.SH"}
+    assert set(
+        reader.read_range("l1_factors", **kwargs, pool_symbols=["600001"])["symbol"]
+    ) == {"600001.SH"}
+    assert set(
+        reader.read_range(
+            "l1_factors", **kwargs, pool_symbols=["600001.SH", "000001.SZ"]
+        )["symbol"]
+    ) == {"600001.SH", "000001.SZ"}
+
+    # 池内标的在区间/数据源内无记录 → 空 frame（上游 loading 据此报错）
+    assert reader.read_range(
+        "l1_factors", **kwargs, pool_symbols=["600002.SH"]
+    ).empty
+    # 脏输入被白名单丢弃 → fail fast（绝不能退化成全市场）
+    with pytest.raises(QuantDBFactorError, match="无法解析出任何有效代码"):
+        reader.read_range("l1_factors", **kwargs, pool_symbols=["'; DROP TABLE--"])
+    # 不传池＝全量（回归旧行为）
+    assert set(reader.read_range("l1_factors", **kwargs)["symbol"]) == {
+        "600001.SH",
+        "000001.SZ",
+    }
+
+
+def test_read_range_pool_symbols_pushdown_prefix_storage(tmp_path):
+    """存储为前缀式（老数据）时，后缀池同样要在 SQL 层命中。"""
+    prefix_frame = _frame("2024-01-02", 10).copy()
+    prefix_frame["symbol"] = ["SH600001", "SZ000001"]
+    _write_factor_partition(tmp_path, "l1_factors", prefix_frame, "20240102")
+    reader = QuantDBFactorReader(tmp_path)
+
+    data = reader.read_range(
+        "l1_factors",
+        features=["l1_alpha"],
+        start="2024-01-02",
+        end="2024-01-02",
+        pool_symbols=["600001.SH"],
+    )
+    assert len(data) == 1
+    # 读出后统一归一为后缀口径
+    assert set(data["symbol"]) == {"600001.SH"}
 
 
 def test_read_range_backfills_null_factor_ohlcv_from_daily_backward(tmp_path):
