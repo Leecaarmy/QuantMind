@@ -29,6 +29,36 @@ def _to_prefix_symbol(sym: str) -> str:
     return s
 
 
+def _to_suffix_symbol(sym: str) -> str:
+    """转后缀式（600036.SH）：前缀式拆解重组；已是后缀则原样大写。"""
+    s = str(sym or "").strip().upper()
+    if "." in s:
+        code, exch = s.split(".", 1)
+        # 已是后缀 600036.SH
+        if len(code) == 6 and code.isdigit() and exch in ("SH", "SZ", "BJ"):
+            return s
+        # 反写 SH.600036 → 600036.SH
+        if len(exch) == 6 and exch.isdigit() and code in ("SH", "SZ", "BJ"):
+            return exch + "." + code
+        return s
+    # 前缀 SH600036 → 600036.SH
+    if len(s) == 8 and s[:2] in ("SH", "SZ", "BJ") and s[2:].isdigit():
+        return s[2:] + "." + s[:2]
+    return s
+
+
+def _symbol_core(sym_up: str) -> str:
+    """取 6 位裸码：前后缀双口径兼容（600036.SH / SH600036 / 600036）。"""
+    s = str(sym_up or "").strip().upper()
+    if "." in s:
+        s = s.split(".", 1)[0]
+    for _px in ("SH", "SZ", "BJ"):
+        if s.startswith(_px) and len(s) == 8:
+            s = s[2:]
+            break
+    return s.zfill(6) if s.isdigit() else s
+
+
 def _load_local_parquet(
     local_dir: Path,
     year: int,
@@ -248,21 +278,32 @@ def load_data(
         )
         # 池尽早过滤（P3）：直读返回全市场（1053 万行），114 列 float64 在
         # 后续复制展开期峰值会触发容器 mem_limit（Exit 137）；池内成分先过滤，
-        # 后续 downcast/漂移/标签全量受益。直读 symbol 为前缀式。
+        # 后续 downcast/漂移/标签全量受益。直读 symbol 经 QuantDBFactorReader
+        # 归一为后缀式（600036.SH），老数据可能仍是前缀式，此处必须双口径匹配，
+        # 与函数末尾全局池过滤保持一致；单用前缀集合会零命中误杀。
         if pool_symbols and market_upper == "CN" and "symbol" in df.columns:
-            _wanted_early = {
-                _to_prefix_symbol(s) for s in pool_symbols if str(s).strip()
-            }
-            if not _wanted_early:
+            _pool_clean = [s for s in pool_symbols if str(s).strip()]
+            _wanted_prefix = {_to_prefix_symbol(s) for s in _pool_clean}
+            _wanted_suffix = {_to_suffix_symbol(s) for s in _pool_clean}
+            _wanted_core = {_symbol_core(s) for s in _pool_clean}
+            if not (_wanted_prefix or _wanted_suffix or _wanted_core):
                 raise RuntimeError("pool_symbols 非空但无法解析出任何代码")
             _before_early = len(df)
+            _sym_up = df["symbol"].astype(str).str.upper()
+            _sym_core = (
+                _sym_up.str.split(".", n=1)
+                .str[0]
+                .str.replace(r"^(SH|SZ|BJ)", "", regex=True)
+            )
             df = df[
-                df["symbol"].astype(str).str.upper().isin(_wanted_early)
+                _sym_up.isin(_wanted_prefix)
+                | _sym_up.isin(_wanted_suffix)
+                | _sym_core.isin(_wanted_core)
             ].copy()
             logger.info(
                 "After early pool filter: %d rows (pool=%d symbols, before=%d)",
                 len(df),
-                len(_wanted_early),
+                len(_pool_clean),
                 _before_early,
             )
             if df.empty:
