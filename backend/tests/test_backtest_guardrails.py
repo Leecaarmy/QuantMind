@@ -921,7 +921,9 @@ def test_advanced_trade_stats_handles_missing_pnl_columns():
     assert stats["trade_frequency_series"]["values"] == [2.0]
 
 
-def test_risk_metrics_uses_geometric_benchmark_annualization(monkeypatch):
+def test_risk_metrics_uses_headline_annual_for_alpha(monkeypatch):
+    """alpha 的 Rp 必须用报告 headline 年化（与 annual_return 同源），而不是对齐
+    子集重算——旧写法在基准缺位时子集变短，alpha 系统性偏高（审计报告 §2）。"""
     import pandas as pd
 
     dates = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07", "2025-01-08"])
@@ -952,8 +954,76 @@ def test_risk_metrics_uses_geometric_benchmark_annualization(monkeypatch):
     aligned = pd.concat([daily_returns, bm_returns], axis=1, join="inner")
     aligned.columns = ["portfolio", "benchmark"]
     beta = aligned["portfolio"].cov(aligned["benchmark"]) / aligned["benchmark"].var()
-    expected_port_annual = (1.0 + aligned["portfolio"]).prod() ** (252 / len(aligned)) - 1
     expected_bm_annual = (1.0 + aligned["benchmark"]).prod() ** (252 / len(aligned)) - 1
 
     assert metrics["beta"] == pytest.approx(beta)
-    assert metrics["alpha"] == pytest.approx(expected_port_annual - beta * expected_bm_annual)
+    # Rp 用 headline 9.99（调用方传入），不再用对齐子集的几何重算值
+    assert metrics["alpha"] == pytest.approx(9.99 - beta * expected_bm_annual)
+
+
+def test_drop_impossible_sells_removes_ghost_sells():
+    """回归：整仓重复卖单（无持仓可平）必须剔除。"""
+    trades = [
+        {"date": "2025-10-20", "symbol": "sz000017", "action": "buy", "price": 8.0, "quantity": 105300},
+        {"date": "2025-10-21", "symbol": "sz000017", "action": "sell", "price": 8.84, "quantity": 105300},
+        {"date": "2025-10-22", "symbol": "sz000017", "action": "sell", "price": 9.57, "quantity": 105300},
+    ]
+    kept, dropped = RiskAnalyzer.drop_impossible_sells(trades)
+    assert len(kept) == 2
+    assert len(dropped) == 1
+    assert dropped[0]["date"] == "2025-10-22"
+
+
+def test_drop_impossible_sells_keeps_corporate_action_sells():
+    """公司行为（复权口径下完全平掉）不能被误杀：用 adj_quantity 判断。"""
+    trades = [
+        {"date": "2025-10-20", "symbol": "sh601328", "action": "buy",
+         "price": 5.0, "quantity": 18000, "adj_quantity": 18000.0},
+        {"date": "2025-10-21", "symbol": "sh601328", "action": "sell",
+         "price": 5.1, "quantity": 18390, "adj_quantity": 18000.0},
+    ]
+    kept, dropped = RiskAnalyzer.drop_impossible_sells(trades)
+    assert len(kept) == 2
+    assert dropped == []
+
+
+def test_drop_impossible_sells_skipped_for_short_strategies():
+    """做空策略允许裸卖开仓，不做剔除；长仓策略则剔除。"""
+    trades = [
+        {"date": "2025-10-21", "symbol": "sh600000", "action": "sell_to_open",
+         "price": 10.0, "quantity": 100},
+    ]
+    kept, dropped = RiskAnalyzer.drop_impossible_sells(trades, allow_short=True)
+    assert len(kept) == 1 and dropped == []
+    kept2, dropped2 = RiskAnalyzer.drop_impossible_sells(trades, allow_short=False)
+    assert len(kept2) == 0 and len(dropped2) == 1
+
+
+def test_trade_stats_prefers_fifo_over_daily_fallback():
+    """回归：无 pnl 流水优先 FIFO 逐笔口径，不掉进日频回退。"""
+    import pandas as pd
+
+    trades = [
+        {"date": "2025-01-02", "symbol": "SH600000", "action": "buy", "price": 10.0, "quantity": 100},
+        {"date": "2025-01-06", "symbol": "SH600000", "action": "sell", "price": 12.0, "quantity": 100},
+        {"date": "2025-01-03", "symbol": "SH600001", "action": "buy", "price": 20.0, "quantity": 100},
+        {"date": "2025-01-07", "symbol": "SH600001", "action": "sell", "price": 19.0, "quantity": 100},
+    ]
+    returns = pd.Series(
+        [0.05, 0.05, 0.05, 0.05], index=pd.bdate_range("2025-01-02", periods=4)
+    )
+    stats = RiskAnalyzer._calculate_trade_stats(trades, daily_returns=returns)
+    assert stats["total_trades"] == 4
+    assert stats["win_rate"] == pytest.approx(0.5)
+    assert stats["avg_win"] == pytest.approx(0.2, rel=1e-6)
+    assert stats["avg_loss"] == pytest.approx(0.05, rel=1e-6)
+    assert stats["closed_trades"] == 2
+
+
+def test_closed_trade_stats_returns_none_without_matching_pair():
+    """配不出闭环（如只买未卖）时返回 None，调用方继续走日频回退。"""
+    trades = [
+        {"date": "2025-01-02", "symbol": "SH600000", "action": "buy",
+         "price": 10.0, "quantity": 100},
+    ]
+    assert RiskAnalyzer._closed_trade_stats_from_matching(trades) is None

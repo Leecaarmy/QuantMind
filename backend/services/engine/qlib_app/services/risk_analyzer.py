@@ -175,6 +175,76 @@ class RiskAnalyzer:
         return score
 
     @classmethod
+    @classmethod
+    def drop_impossible_sells(
+        cls, trades: list[dict[str, Any]], allow_short: bool = False
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """剔除无持仓可平的"幽灵卖单"（只进交易日志、未进净值的那 7 笔）。
+
+        长仓策略（allow_short=False）中，卖出数量超过累计净持仓的记录不可能
+        真实成交：按日期逐笔维护每只标的的净持仓（优先复权数量口径，保证
+        除权除息前后可比，公司行为导致的"卖多买少"不会被误杀），超卖的整笔
+        丢弃并返回，调用方记入 advanced_stats 备查。
+        做空策略（long_short_topk / short_topk>0）允许裸卖开仓，此时不做剔除。
+        """
+        if not isinstance(trades, list) or not trades or allow_short:
+            return (trades, [])
+        nets: dict[str, float] = {}
+        drop_idx: set[int] = set()
+
+        def _qty_of(row: dict[str, Any]) -> float | None:
+            for key in ("adj_quantity", "quantity"):
+                val = cls._to_finite_float(row.get(key))
+                if val is not None and val > 0:
+                    return abs(float(val))
+            return None
+
+        order = sorted(
+            range(len(trades)), key=lambda i: str((trades[i] or {}).get("date", ""))[:10]
+        )
+        for i in order:
+            row = trades[i]
+            if not isinstance(row, dict):
+                continue
+            action = str(row.get("action", "")).strip().lower()
+            symbol = str(row.get("symbol", "")).upper()
+            if not symbol:
+                continue
+            qty = _qty_of(row)
+            if action.startswith("buy"):
+                if qty is not None:
+                    nets[symbol] = nets.get(symbol, 0.0) + qty
+            elif action.startswith("sell"):
+                if qty is None:
+                    continue
+                held = nets.get(symbol, 0.0)
+                if qty <= held * (1 + 1e-6) + 1e-6:
+                    nets[symbol] = held - qty
+                else:
+                    drop_idx.add(i)
+            # 其它 action（如 "buy/sell" 汇总行）无法判断，原样保留
+
+        if not drop_idx:
+            return (trades, [])
+        dropped = [trades[i] for i in sorted(drop_idx)]
+        kept = [t for i, t in enumerate(trades) if i not in drop_idx]
+        task_logger.warning(
+            "dropped_impossible_sells",
+            "Dropped sell records exceeding cumulative position (never settled in NAV)",
+            count=len(dropped),
+            sample=[
+                {
+                    "date": str(d.get("date", ""))[:10],
+                    "symbol": d.get("symbol"),
+                    "action": d.get("action"),
+                    "quantity": d.get("quantity"),
+                }
+                for d in dropped[:10]
+            ],
+        )
+        return (kept, dropped)
+
+    @classmethod
     def _deduplicate_trades(cls, trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(trades, list) or not trades:
             return trades
@@ -342,14 +412,27 @@ class RiskAnalyzer:
             beta = float(port_r.cov(bm_r) / bm_var) if bm_var > 0 else None
 
             # Alpha (CAPM): alpha = Rp - [Rf + beta * (Rm - Rf)]
+            # Rp 取调用方传入的 headline 年化（与报告 total_return/annual_return 同源），
+            # 不再用对齐子集重算——旧写法在基准缺失交易日时子集变短，
+            # port_annual 与 headline annual_return 脱钩，导致 alpha 系统性偏高。
             periods = len(aligned)
-            port_compounded = float((1.0 + port_r).prod())
+            if annual_return is not None:
+                try:
+                    port_annual: float | None = float(annual_return)
+                    if not np.isfinite(port_annual):
+                        port_annual = None
+                except (TypeError, ValueError):
+                    port_annual = None
+            else:
+                port_annual = None
+            if port_annual is None:
+                port_compounded = float((1.0 + port_r).prod())
+                port_annual = (
+                    float(port_compounded ** (252 / periods) - 1)
+                    if periods > 0 and port_compounded > 0
+                    else None
+                )
             bm_compounded = float((1.0 + bm_r).prod())
-            port_annual = (
-                float(port_compounded ** (252 / periods) - 1)
-                if periods > 0 and port_compounded > 0
-                else annual_return
-            )
             bm_annual = float(bm_compounded ** (252 / periods) - 1) if periods > 0 and bm_compounded > 0 else None
             alpha = (
                 (port_annual - (risk_free_rate + beta * (bm_annual - risk_free_rate)))
@@ -392,9 +475,9 @@ class RiskAnalyzer:
             return report
         return None
 
-    @staticmethod
+    @classmethod
     def _calculate_trade_stats(
-        trades: list[dict[str, Any]], daily_returns: pd.Series | None = None
+        cls, trades: list[dict[str, Any]], daily_returns: pd.Series | None = None
     ) -> dict[str, Any]:
         if not trades:
             return {
@@ -428,7 +511,23 @@ class RiskAnalyzer:
         avg_win = sum_wins / len(wins) if wins else 0.0
         avg_loss = sum_losses / len(losses) if losses else 0.0
 
-        # 部分交易流水只有成交信息无 pnl 时，回退到日收益口径，避免指标长期为 0
+        # 逐笔口径优先：流水无 pnl 字段时，用 FIFO 闭环配对算真实单笔胜率/
+        # 盈亏比，而不是直接掉进下面的日频回退。日频回退只在连一对闭环
+        # 都配不出时（如只买未卖的事件型策略）才启用，避免口径错位。
+        if win_count == 0 and len(losses) == 0:
+            fifo_stats = cls._closed_trade_stats_from_matching(trades)
+            if fifo_stats is not None:
+                return {
+                    "total_trades": total_trades,
+                    "win_rate": fifo_stats["win_rate"],
+                    "profit_factor": fifo_stats["profit_factor"],
+                    "avg_win": fifo_stats["avg_win"],
+                    "avg_loss": fifo_stats["avg_loss"],
+                    "closed_trades": fifo_stats["closed_trades"],
+                    "open_buy_trades": fifo_stats["open_buy_trades"],
+                }
+
+        # 部分交易流水只有成交信息、无 pnl 且配不出闭环时，回退到日收益口径，
         if win_count == 0 and len(losses) == 0 and daily_returns is not None:
             try:
                 clean_returns = daily_returns.dropna()
@@ -467,6 +566,61 @@ class RiskAnalyzer:
             "avg_loss": avg_loss,
         }
 
+    @staticmethod
+    def _closed_trade_stats_from_matching(
+        trades: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """用 FIFO 闭环配对产出逐笔统计；配不出闭环时返回 None（调用方再回退日频）。
+
+        口径：win_rate = 盈利闭环 / 全部闭环；avg_win/avg_loss 为单笔收益率
+        均值（与旧日频口径同单位：小数，如 0.1027 = 10.27%）；profit_factor =
+        盈利总额 / 亏损总额（含手续费分摊）。
+        """
+        try:
+            from backend.services.engine.qlib_app.services.trade_metrics_utils import (
+                calculate_closed_trade_metrics,
+                summarize_trade_matching,
+            )
+        except Exception as exc:
+            task_logger.warning(
+                "fifo_matching_import_failed",
+                "Failed to import FIFO trade matching utils",
+                error=str(exc),
+            )
+            return None
+        try:
+            matched = summarize_trade_matching(trades)
+            closed = matched.get("closed_trades")
+            if closed is None or getattr(closed, "empty", True):
+                return None
+            metrics = calculate_closed_trade_metrics(
+                closed,
+                total_trade_events=len(trades),
+                open_buy_trades=int(matched.get("open_buy_trades", 0) or 0),
+            )
+            if metrics.get("metric_basis") != "closed_trade_fifo":
+                return None
+            profit_factor = metrics.get("profit_factor", 0.0)
+            try:
+                profit_factor = float(profit_factor)
+            except (TypeError, ValueError):
+                profit_factor = 0.0
+            return {
+                "win_rate": float(metrics.get("win_rate", 0.0) or 0.0),
+                "profit_factor": profit_factor if np.isfinite(profit_factor) else 0.0,
+                "avg_win": float(metrics.get("avg_win_return", 0.0) or 0.0),
+                "avg_loss": float(metrics.get("avg_loss_return", 0.0) or 0.0),
+                "closed_trades": int(metrics.get("closed_trades", 0) or 0),
+                "open_buy_trades": int(metrics.get("open_buy_trades", 0) or 0),
+            }
+        except Exception as exc:
+            task_logger.warning(
+                "fifo_matching_failed",
+                "FIFO trade matching failed, caller falls back to daily returns",
+                error=str(exc),
+            )
+            return None
+
     @classmethod
     def _calculate_advanced_trade_stats(
         cls, trades: list[dict[str, Any]], daily_returns: pd.Series | None = None
@@ -497,17 +651,43 @@ class RiskAnalyzer:
             pnl_counts, pnl_bins = np.histogram(pnl_series.dropna(), bins=20)
             pnl_distribution = {"bins": pnl_bins.tolist(), "counts": pnl_counts.tolist()}
 
-            # 2. 持仓天数分布（优先使用 holding_days 字段，否则从买卖配对推导）
-            raw_holding_days = (
-                df_trades["holding_days"]
-                if "holding_days" in df_trades.columns
-                else pd.Series(dtype=float, index=df_trades.index)
-            )
-            holding_days = pd.to_numeric(raw_holding_days, errors="coerce").dropna()
+            # 2. 持仓天数分布（与 win_rate 同源：优先用 FIFO 闭环的 holding_days，
+            # 保证"持有期统计"与"逐笔胜率"来自同一批闭环；配不出闭环才用买卖配对推导）
+            fifo_holding_days: pd.Series | None = None
+            try:
+                from backend.services.engine.qlib_app.services.trade_metrics_utils import (
+                    summarize_trade_matching as _summarize_matching,
+                )
 
-            # 如果没有直接的 holding_days 字段，尝试从买卖配对推导
-            if holding_days.empty and "symbol" in df_trades.columns and "action" in df_trades.columns:
-                holding_days = cls._derive_holding_days_from_trades_for_stats(df_trades, date_col)
+                _matched = _summarize_matching(trades)
+                _closed = _matched.get("closed_trades")
+                if _closed is not None and not getattr(_closed, "empty", True) and "holding_days" in _closed.columns:
+                    fifo_holding_days = pd.to_numeric(
+                        _closed["holding_days"], errors="coerce"
+                    ).replace([np.inf, -np.inf], np.nan).dropna()
+                    if fifo_holding_days.empty:
+                        fifo_holding_days = None
+            except Exception as exc:
+                task_logger.warning(
+                    "fifo_holding_days_failed",
+                    "FIFO holding days unavailable, fall back to pairing derivation",
+                    error=str(exc),
+                )
+                fifo_holding_days = None
+
+            if fifo_holding_days is not None:
+                holding_days = fifo_holding_days
+            else:
+                raw_holding_days = (
+                    df_trades["holding_days"]
+                    if "holding_days" in df_trades.columns
+                    else pd.Series(dtype=float, index=df_trades.index)
+                )
+                holding_days = pd.to_numeric(raw_holding_days, errors="coerce").dropna()
+
+                # 如果没有直接的 holding_days 字段，尝试从买卖配对推导
+                if holding_days.empty and "symbol" in df_trades.columns and "action" in df_trades.columns:
+                    holding_days = cls._derive_holding_days_from_trades_for_stats(df_trades, date_col)
 
             if holding_days.empty:
                 holding_days = pd.Series([1.0])  # 默认 1 天
@@ -1029,16 +1209,32 @@ class RiskAnalyzer:
                     else:
                         equity = (1 + daily_returns).cumprod() * request.initial_capital
 
-                    # Volatility & Sharpe: use net daily returns from equity curve
+                    # Volatility & Sharpe: use net daily returns from equity curve.
+                    # 口径统一（标准 Sharpe）：超额 = 日收益 − 日化无风险利率，
+                    # Sharpe = mean(超额)/std(超额) × √252。旧写法用几何年化收益
+                    # 直接相减，对高收益策略会虚高近 2 倍（审计报告 §2）。
+                    net_daily_returns = None
                     if len(equity) > 1:
                         net_daily_returns = equity.pct_change().dropna()
                         if len(net_daily_returns) > 1:
                             vol_value = net_daily_returns.std(ddof=1) * np.sqrt(252)
                             volatility = cls._clean_nan(float(vol_value))
 
-                    if volatility and volatility > 0:
-                        risk_free_rate = float(getattr(request, "risk_free_rate", 0.02))
-                        sharpe_ratio = cls._clean_nan((annual_return - risk_free_rate) / volatility)
+                    if volatility and volatility > 0 and net_daily_returns is not None:
+                        risk_free_rate = float(getattr(request, "risk_free_rate", 0.02) or 0.0)
+                        daily_rf = (1 + risk_free_rate) ** (1 / 252) - 1
+                        excess = net_daily_returns - daily_rf
+                        excess_std = float(excess.std(ddof=1))
+                        if excess_std > 0:
+                            sharpe_ratio = cls._clean_nan(
+                                float(excess.mean() / excess_std * np.sqrt(252))
+                            )
+
+                    # 单源口径：波动/Sharpe/alpha/beta/IR/涨跌天统计全部用净值
+                    # 派生的同一序列，避免 report["return"] 与净值曲线差 1 个
+                    # 观测导致的口径漂移（审计报告 §5：129/242 vs 128/114）。
+                    if net_daily_returns is not None and len(net_daily_returns) > 0:
+                        daily_returns = net_daily_returns
 
                     cummax = equity.cummax()
                     drawdown = (equity - cummax) / cummax
@@ -1094,6 +1290,24 @@ class RiskAnalyzer:
 
         await report_progress(0.93, "正在深度解析交易明细与高级统计指标...")
         trades = cls.normalize_trades_for_display(trades)
+
+        # 幽灵卖单过滤：做空策略允许裸卖开仓，长仓策略中超卖整笔不可能成交
+        # （只进日志、未进净值），剔除并留痕，避免 total_trades 与逐笔统计虚增。
+        ghost_sells: list[dict[str, Any]] = []
+        try:
+            allow_short = str(getattr(request, "strategy_type", "") or "").strip().lower() == "long_short_topk"
+            if not allow_short:
+                try:
+                    allow_short = float(getattr(request.strategy_params, "short_topk", 0) or 0) > 0
+                except (TypeError, ValueError, AttributeError):
+                    pass
+            trades, ghost_sells = cls.drop_impossible_sells(trades, allow_short=allow_short)
+        except Exception as exc:
+            task_logger.warning(
+                "ghost_sell_filter_failed",
+                "Ghost-sell filter failed, keeping raw trades",
+                error=str(exc),
+            )
         positions = cls._build_positions_list(portfolio_dict)
 
         await report_progress(0.94, "正在计算交易统计指标...")
@@ -1101,6 +1315,20 @@ class RiskAnalyzer:
 
         await report_progress(0.95, "正在计算高级统计指标...")
         advanced_stats = cls._calculate_advanced_trade_stats(trades, daily_returns=daily_returns)
+        if ghost_sells:
+            advanced_stats["dropped_ghost_sells"] = {
+                "count": len(ghost_sells),
+                "records": [
+                    {
+                        "date": str(g.get("date", ""))[:10],
+                        "symbol": g.get("symbol"),
+                        "action": g.get("action"),
+                        "quantity": g.get("quantity"),
+                        "price": g.get("price"),
+                    }
+                    for g in ghost_sells[:50]
+                ],
+            }
 
         factor_metrics = None
         stratified_returns = None
@@ -1178,6 +1406,12 @@ class RiskAnalyzer:
             task_logger.exception("advanced_analysis_skipped", "Advanced analysis skipped", error=str(fe))
 
         await report_progress(0.99, "正在汇总回测报告结果...")
+        # 顶层口径元数据：与 config 内同源，避免汇总层 null（审计报告 §5-④）。
+        effective_model_id = None
+        if signal_meta:
+            effective_model_id = signal_meta.get("effective_model_id")
+        if not effective_model_id and hasattr(request, "model_id") and request.model_id:
+            effective_model_id = request.model_id
         return QlibBacktestResult(
             backtest_id=backtest_id,
             tenant_id=request.tenant_id,
@@ -1185,6 +1419,10 @@ class RiskAnalyzer:
             created_at=created_at,
             completed_at=datetime.now(),
             config=cls._build_config_payload(request, signal_meta=signal_meta),
+            model_name=effective_model_id,
+            analysis_ready=True,
+            signal_lag_days=getattr(request, "signal_lag_days", None),
+            deal_price=getattr(request, "deal_price", None),
             annual_return=float(annual_return) if annual_return is not None else 0.0,
             sharpe_ratio=float(sharpe_ratio) if sharpe_ratio is not None else 0.0,
             max_drawdown=float(max_drawdown) if max_drawdown is not None else 0.0,
@@ -1207,6 +1445,12 @@ class RiskAnalyzer:
             profit_factor=trade_stats["profit_factor"],
             avg_win=trade_stats["avg_win"],
             avg_loss=trade_stats["avg_loss"],
+            avg_holding_period=(
+                float(advanced_stats.get("avg_holding_days"))
+                if isinstance(advanced_stats, dict)
+                and advanced_stats.get("avg_holding_days") is not None
+                else None
+            ),
             factor_metrics=factor_metrics,
             stratified_returns=stratified_returns,
             style_attribution=style_attribution,
