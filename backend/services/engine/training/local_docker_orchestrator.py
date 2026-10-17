@@ -1475,3 +1475,89 @@ async def cleanup_stale_training_containers() -> dict:
         stats["errors"],
     )
     return stats
+
+
+# ── 启动兜底恢复：被训练 pause 后因任务早夭而遗忘的容器 ────────────────────────
+# 背景：_pause_others 把名单写进 {run}/.paused_containers.json，正常由同 run 的
+# _resume_others 在结束后恢复。但任务若在 pause 之后、resume 之前死亡
+# （早夭/进程被杀/容器重启），该文件永无 resumed_at，被停的容器（如 qwenpaw）
+# 就永久躺平——后续任务的 state 文件 containers 为空，各扫门前雪。
+# 本函数只在 API lifespan 启动时跑一次（见 services/api/main.py），扫描全部
+# 历史 state 文件，恢复其中无 resumed_at 且 paused_at 在 7 天内的条目；
+# 更老的只告警留给人工（防止把刻意长期停掉的容器拉起来）；永不抛异常。
+_ORPHAN_RESUME_MAX_AGE_DAYS = 7
+
+
+async def resume_orphaned_paused_containers(
+    jobs_root: str | Path | None = None,
+) -> dict:
+    """API 启动时恢复训练遗忘的被暂停容器，永不抛异常（lifespan 必须非致命）。"""
+    stats = {"scanned": 0, "resumed": 0, "skipped": 0, "errors": 0}
+    if docker is None or DockerClient is None:
+        return {**stats, "disabled": "docker-sdk-missing"}
+    try:
+        client = DockerClient.from_env()
+    except Exception as exc:
+        logger.warning("orphan pause resume: docker client failed: %s", exc)
+        return {**stats, "disabled": str(exc)[:120]}
+    root = Path(jobs_root) if jobs_root is not None else Path("/data") / "training_jobs"
+    if not root.is_dir():
+        return {**stats, "disabled": f"jobs-root-missing:{root}"}
+    now = datetime.now(timezone.utc)
+    for state_path in sorted(root.glob("*/.paused_containers.json")):
+        stats["scanned"] += 1
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("orphan pause resume: read %s failed: %s", state_path, exc)
+            stats["errors"] += 1
+            continue
+        if not isinstance(data, dict) or data.get("resumed_at"):
+            stats["skipped"] += 1
+            continue
+        try:
+            paused_at = datetime.fromisoformat(str(data.get("paused_at") or ""))
+            if paused_at.tzinfo is None:
+                paused_at = paused_at.replace(tzinfo=timezone.utc)
+            age_days = (now - paused_at).total_seconds() / 86400.0
+        except Exception:
+            age_days = -1.0
+        if age_days > _ORPHAN_RESUME_MAX_AGE_DAYS:
+            logger.warning(
+                "orphan pause resume: %s too old (%.1fd), needs human: %s",
+                state_path.parent.name, age_days, data.get("containers"),
+            )
+            stats["skipped"] += 1
+            continue
+        names: list = list(data.get("containers") or [])
+        resumed: list = []
+        for name in names:
+            try:
+                c = client.containers.get(name)
+                status = str(getattr(c, "status", "") or "").lower()
+                if status != "running":
+                    await asyncio.to_thread(c.start)
+                resumed.append(name)
+                logger.info(
+                    "orphan pause resume: %s running (from %s)",
+                    name, state_path.parent.name,
+                )
+            except Exception as exc:
+                # 已删除等一律跳过记错，不阻断其它容器
+                logger.warning("orphan pause resume: start %s failed: %s", name, exc)
+                stats["errors"] += 1
+        try:
+            data["resumed_at"] = now.isoformat(timespec="seconds")
+            data["resumed"] = resumed
+            data["resumed_by"] = "startup-reconcile"
+            state_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+        stats["resumed"] += len(resumed)
+    logger.info(
+        "orphan pause resume done: scanned=%d resumed=%d skipped=%d errors=%d",
+        stats["scanned"], stats["resumed"], stats["skipped"], stats["errors"],
+    )
+    return stats

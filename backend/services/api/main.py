@@ -140,6 +140,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ stale training cleanup schedule failed: {e}", exc_info=True)
 
+    # 训练 pause 遗忘恢复：任务在 pause 后早夭会导致被停容器（如 qwenpaw）
+    # 永久躺平（state 文件无 resumed_at，后续任务各扫门前雪）。
+    # 启动时扫描 7 天内的孤儿 state 并恢复，更老的只告警；失败不影响启动健康。
+    try:
+        from backend.services.engine.training.local_docker_orchestrator import (
+            resume_orphaned_paused_containers,
+        )
+
+        asyncio.create_task(resume_orphaned_paused_containers())
+    except Exception as e:
+        logger.error(f"❌ orphan pause resume schedule failed: {e}", exc_info=True)
+
     # 每日自动强制更新轮询（开关由管理后台保存于 Redis；不可用/异常均不影响启动健康）
     try:
         from backend.shared.auto_update import start_auto_update_loop
