@@ -17,6 +17,11 @@ interface QuantDBDiffSummaryProps {
     loading: boolean;
     onCheckUpdates: () => void;
     onSyncSelected: (datasets: string[]) => void;
+    /** 下方目录实际展示的数据集名集合（已剔除隐藏大类/隐藏集）。
+     * 传入后统计与可同步列表只按此集合计算，使上下两处口径一致；
+     * 不传时退化为旧行为（全量 + HIDDEN_DATASETS 过滤）。
+     * 集合外仍需同步的隐藏集会单独标注条数，不混入统计。 */
+    visibleDatasetNames?: Set<string> | null;
 }
 
 const STATUS_CONFIG: Record<string, { color: string; label: string; icon: React.ReactNode }> = {
@@ -38,17 +43,38 @@ export const QuantDBDiffSummary: React.FC<QuantDBDiffSummaryProps> = ({
     loading,
     onCheckUpdates,
     onSyncSelected,
+    visibleDatasetNames = null,
 }) => {
-    const summary = diff?.summary;
+    const inScope = (name: string) => !visibleDatasetNames || visibleDatasetNames.has(name);
+    const scopedDatasets = diff ? diff.datasets.filter(d => inScope(d.dataset)) : [];
 
-    const behindDatasets = diff
-        ? diff.datasets.filter(d => d.status === 'updates_available' && !HIDDEN_DATASETS.has(d.dataset))
-        : [];
-    const notSyncedDatasets = diff
-        ? diff.datasets.filter(d => d.status === 'not_synced' && !HIDDEN_DATASETS.has(d.dataset))
-        : [];
+    const summary = React.useMemo(() => {
+        const s = { total_datasets: 0, up_to_date: 0, updates_available: 0, not_synced: 0, unknown: 0 };
+        for (const d of scopedDatasets) {
+            s.total_datasets += 1;
+            if (d.status === 'up_to_date') s.up_to_date += 1;
+            else if (d.status === 'updates_available') s.updates_available += 1;
+            else if (d.status === 'not_synced') s.not_synced += 1;
+            else s.unknown += 1;
+        }
+        return s;
+    }, [diff, visibleDatasetNames]);
+
+    const behindDatasets = scopedDatasets.filter(
+        d => d.status === 'updates_available' && !HIDDEN_DATASETS.has(d.dataset),
+    );
+    const notSyncedDatasets = scopedDatasets.filter(
+        d => d.status === 'not_synced' && !HIDDEN_DATASETS.has(d.dataset),
+    );
 
     const syncableDatasets = [...behindDatasets, ...notSyncedDatasets];
+
+    // 作用域外（下方列表不展示的隐藏集）仍需同步时，仅标注条数，不混入统计。
+    const hiddenSyncable = diff
+        ? diff.datasets.filter(
+            d => (d.status === 'updates_available' || d.status === 'not_synced') && !inScope(d.dataset),
+        )
+        : [];
 
     return (
         <Card
@@ -57,9 +83,9 @@ export const QuantDBDiffSummary: React.FC<QuantDBDiffSummaryProps> = ({
                 <Space>
                     <CloudSyncOutlined />
                     <span>数据更新检查</span>
-                    {summary && (
+                    {diff && (
                         <Text type="secondary" className="text-xs">
-                            （检查时间: {new Date(diff!.timestamp).toLocaleTimeString()}）
+                            （检查时间: {new Date(diff.timestamp).toLocaleTimeString()}）
                         </Text>
                     )}
                 </Space>
@@ -91,25 +117,25 @@ export const QuantDBDiffSummary: React.FC<QuantDBDiffSummaryProps> = ({
                     <Space size="large" className="mb-3">
                         <Statistic
                             title="已最新"
-                            value={summary!.up_to_date}
+                            value={summary.up_to_date}
                             valueStyle={{ color: '#10b981', fontSize: 20 }}
                             prefix={<CheckCircleFilled />}
                         />
                         <Statistic
                             title="有更新"
-                            value={summary!.updates_available}
+                            value={summary.updates_available}
                             valueStyle={{ color: '#f59e0b', fontSize: 20 }}
                             prefix={<ExclamationCircleFilled />}
                         />
                         <Statistic
                             title="未同步"
-                            value={summary!.not_synced}
+                            value={summary.not_synced}
                             valueStyle={{ color: '#94a3b8', fontSize: 20 }}
                             prefix={<QuestionCircleFilled />}
                         />
                         <Statistic
                             title="未知"
-                            value={summary!.unknown}
+                            value={summary.unknown}
                             valueStyle={{ color: '#cbd5e1', fontSize: 20 }}
                         />
                     </Space>
@@ -148,10 +174,21 @@ export const QuantDBDiffSummary: React.FC<QuantDBDiffSummaryProps> = ({
                         </div>
                     )}
 
-                    {summary!.up_to_date === summary!.total_datasets && (
+                    {summary.up_to_date === summary.total_datasets && (
                         <Text type="success" className="text-sm">
-                            所有数据集均为最新，无需同步
+                            {visibleDatasetNames
+                                ? '下方列表中的数据集均为最新，无需同步'
+                                : '所有数据集均为最新，无需同步'}
                         </Text>
+                    )}
+                    {hiddenSyncable.length > 0 && (
+                        <div className="mt-1">
+                            <Text type="secondary" className="text-xs">
+                                另有 {hiddenSyncable.length} 个隐藏数据集
+                                （{hiddenSyncable.map(d => d.name).join('、')}）需要同步，
+                                未在下方列表展示，可单独按需同步
+                            </Text>
+                        </div>
                     )}
                 </div>
             ) : (

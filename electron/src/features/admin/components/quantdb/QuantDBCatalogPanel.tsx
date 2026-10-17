@@ -143,9 +143,19 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0, e
         }
     }, []);
 
+    // 下方目录实际展示的数据集名集合（已剔除隐藏大类/隐藏集），
+    // 传给 diff 卡片做统计作用域，使上下两处口径一致。
+    const visibleDatasetNames = useMemo(
+        () => (datasets.length > 0 ? new Set(datasets.map((d) => d.dataset)) : null),
+        [datasets],
+    );
+
     const handleSyncFromDiff = useCallback(async (datasets: string[]) => {
-        // diff 结果可能含前端隐藏的数据集（如 1分/5分/Tick），一律过滤
-        const visible = datasets.filter((n) => !HIDDEN_DATASETS.has(n));
+        // diff 结果可能含下方列表不展示的数据集（如 bond_etf 大类、1分/5分/Tick），
+        // 只同步可见集合内的；目录未加载时退化为 HIDDEN_DATASETS 过滤。
+        const visible = visibleDatasetNames
+            ? datasets.filter((n) => visibleDatasetNames.has(n))
+            : datasets.filter((n) => !HIDDEN_DATASETS.has(n));
         setSelected(visible);
         if (visible.length === 0) return;
         setSubmitting(true);
@@ -160,7 +170,7 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0, e
         } finally {
             setSubmitting(false);
         }
-    }, []);
+    }, [visibleDatasetNames]);
 
     const handleCancelSync = useCallback(async () => {
         if (!activeJob || activeJob.status !== 'running') return;
@@ -335,6 +345,7 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0, e
                     loading={diffLoading}
                     onCheckUpdates={handleCheckUpdates}
                     onSyncSelected={handleSyncFromDiff}
+                    visibleDatasetNames={visibleDatasetNames}
                 />
             </div>
 
