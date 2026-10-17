@@ -2656,12 +2656,9 @@ EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'merge 66.6 sim_trades skipped';
 END $$;
 
--- ---- 66.7 个人策略收藏列 ----
---     strategies.is_favorite：个人中心星标收藏（与社区 like_count 无关，
---     后者是公开策略被点赞数）。存量库补列，默认 FALSE。
-ALTER TABLE strategies
-    ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN DEFAULT FALSE;
-
 -- ========================
 -- DONE - 所有缺失表已创建
 -- ========================
+-- 注：后续增量补丁不再进第 66 节，一律新建 data/upgrade_vX.Y.Z.sql
+-- （如 strategies.is_favorite 见 data/upgrade_v1.0.12.sql），由
+-- backend/main_oss.py 启动扫描重放 + deploy/update.sh 去重执行。
