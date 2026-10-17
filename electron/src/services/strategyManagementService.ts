@@ -63,6 +63,7 @@ class StrategyManagementService {
       cos_url: item?.cos_url || undefined,
       is_verified: !!item?.is_verified,
       is_system: !!item?.is_system,
+      is_favorite: !!item?.is_favorite,
       parameters: item?.parameters && typeof item.parameters === 'object' ? item.parameters : {},
       execution_config: item?.execution_config || config.execution_config,
       live_trade_config: item?.live_trade_config || config.live_trade_config,
@@ -304,6 +305,24 @@ class StrategyManagementService {
     const wm = code.match(/["']weight_mode["']\s*:\s*["']([^"']+)["']/);
     if (wm && wm[1]) out.weight_mode = wm[1];
     return out;
+  }
+
+  /**
+   * 设置个人收藏（星标）。POST 置位 / DELETE 清除，幂等；仅属主可操作。
+   */
+  async setFavorite(strategyId: string, favorite: boolean): Promise<boolean> {
+    try {
+      const url = `/api/v1/strategies/${encodeURIComponent(strategyId)}/favorite`;
+      if (favorite) {
+        await this.client.post(url, {});
+      } else {
+        await this.client.delete(url);
+      }
+      return favorite;
+    } catch (error: any) {
+      console.error('[StrategyManagementService] Favorite error:', error);
+      throw new Error(error.response?.data?.detail || error.message || (favorite ? '收藏失败' : '取消收藏失败'));
+    }
   }
 
   /**

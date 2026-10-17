@@ -37,6 +37,9 @@ export function tradingStrategySortRank(strategy: StrategyFile): number {
 }
 
 export function compareTradingStrategies(a: StrategyFile, b: StrategyFile): number {
+  // 收藏始终最优先（先于默认 Top-K 置顶与显式 sort）
+  const favDiff = Number(b.is_favorite ?? false) - Number(a.is_favorite ?? false);
+  if (favDiff !== 0) return favDiff;
   const rankA = tradingStrategySortRank(a);
   const rankB = tradingStrategySortRank(b);
   if (rankA !== rankB) return rankA - rankB;

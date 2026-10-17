@@ -20,6 +20,7 @@ export interface StrategyFile {
   cos_url?: string;          // COS 预签名 URL（私读，TTL=3600s）
   is_verified?: boolean;     // 是否通过回测验证
   is_system?: boolean;       // 是否为系统内置策略
+  is_favorite?: boolean;     // 是否被当前用户收藏（星标置顶）
   parameters?: Record<string, unknown>;
   execution_config?: {
     max_buy_drop?: number;

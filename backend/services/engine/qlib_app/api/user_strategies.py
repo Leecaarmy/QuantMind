@@ -468,6 +468,8 @@ class StrategyListItem(BaseModel):
     cos_url: str | None = None
     is_verified: bool = False
     is_system: bool = False
+    # 个人收藏（星标）：仅属主可见可改，与社区 like_count 无关
+    is_favorite: bool = False
     parameters: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -799,6 +801,7 @@ async def list_user_strategies(
                     if item.get("tags") and item.get("is_system")
                     else "db_stored",
                     is_system=bool(item.get("is_system", False)),
+                    is_favorite=bool(item.get("is_favorite", False)),
                 )
             )
 
@@ -813,6 +816,45 @@ async def list_user_strategies(
 
 
 # --- 重要：静态路径必须放在动态路径 {strategy_id} 之前 ---
+
+
+@router.post("/{strategy_id}/favorite")
+async def favorite_strategy(strategy_id: str, request: Request):
+    """收藏个人策略（幂等置位）。只能操作自己的策略。"""
+    return await _set_strategy_favorite(strategy_id, request, True)
+
+
+@router.delete("/{strategy_id}/favorite")
+async def unfavorite_strategy(strategy_id: str, request: Request):
+    """取消收藏个人策略（幂等清除）。只能操作自己的策略。"""
+    return await _set_strategy_favorite(strategy_id, request, False)
+
+
+async def _set_strategy_favorite(
+    strategy_id: str, request: Request, favorite: bool
+) -> dict[str, Any]:
+    user_id = _get_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未认证")
+    if not str(strategy_id).isdigit():
+        # 系统模板（sys_ 开头）不可收藏
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    svc = get_strategy_storage_service()
+    try:
+        sid = int(strategy_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    # svc.get 按 user_id 过滤：非属主直接 404，避免越权
+    existing = await svc.get(sid, user_id=user_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    ok = await svc.set_favorite(sid, user_id, favorite)
+    if not ok:
+        raise HTTPException(status_code=404, detail="策略不存在")
+    return {"strategy_id": str(sid), "is_favorite": bool(favorite)}
 
 
 @router.post("")

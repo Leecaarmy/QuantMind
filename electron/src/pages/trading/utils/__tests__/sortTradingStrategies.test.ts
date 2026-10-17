@@ -49,4 +49,14 @@ describe('sortTradingStrategies', () => {
     const sorted = sortTradingStrategies([longShort, standard]);
     expect(sorted.map((item) => item.id)).toEqual(['9', '2']);
   });
+
+  it('pins favorited strategies above everything else', () => {
+    const topk = strategy('42', '默认 Top-K 选股策略', {
+      parameters: { strategy_type: 'standard_topk' },
+    });
+    const fav = strategy('8', '我的收藏', { is_favorite: true });
+    const plain = strategy('3', '动量策略', {});
+    const sorted = sortTradingStrategies([topk, plain, fav]);
+    expect(sorted.map((item) => item.id)).toEqual(['8', '42', '3']);
+  });
 });

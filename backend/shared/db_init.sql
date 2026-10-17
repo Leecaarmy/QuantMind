@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS strategies (
     like_count        INTEGER DEFAULT 0,
     version           INTEGER DEFAULT 1,
     is_verified       BOOLEAN DEFAULT FALSE,
+    is_favorite       BOOLEAN DEFAULT FALSE,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -2654,6 +2655,12 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'merge 66.6 sim_trades skipped';
 END $$;
+
+-- ---- 66.7 个人策略收藏列 ----
+--     strategies.is_favorite：个人中心星标收藏（与社区 like_count 无关，
+--     后者是公开策略被点赞数）。存量库补列，默认 FALSE。
+ALTER TABLE strategies
+    ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN DEFAULT FALSE;
 
 -- ========================
 -- DONE - 所有缺失表已创建

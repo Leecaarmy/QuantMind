@@ -1,7 +1,7 @@
 import { useAppSelector } from '../../../store';
 import { selectCurrentMarket } from '../../../store/slices/uiSlice';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle2, ClipboardList, Loader2, Search, Zap, BarChart3, User as UserIcon, Settings2, Sparkles, Filter, Link, ArrowRight, Layers, TrendingUp, Activity, History, Cpu, Clock, Brain, Target, Database, Code, Calendar, Wand2, Eye, Play, CreditCard, Binary, ShieldAlert, Info, TerminalSquare, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, ClipboardList, Loader2, Search, Zap, BarChart3, User as UserIcon, Settings2, Sparkles, Filter, Link, ArrowRight, Layers, TrendingUp, Activity, History, Cpu, Clock, Brain, Target, Database, Code, Calendar, Wand2, Eye, Play, CreditCard, Binary, ShieldAlert, Info, TerminalSquare, AlertTriangle, Star } from 'lucide-react';
 import { DatePicker, Empty, Input, Select, Spin, Tag, message, Tooltip, Badge } from 'antd';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -1089,7 +1089,10 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                 
                                                 {/* Strategy Info */}
                                                 <div className="flex-1 min-w-0 mx-3 text-left">
-                                                    <div className={`font-bold text-[12px] truncate ${isActive ? 'text-blue-900' : 'text-slate-700'}`}>
+                                                    <div className={`font-bold text-[12px] truncate flex items-center gap-1 ${isActive ? 'text-blue-900' : 'text-slate-700'}`}>
+                                                        {strategy.is_favorite && (
+                                                            <Star size={12} className="text-amber-400 shrink-0" fill="currentColor" />
+                                                        )}
                                                         {strategy.name}
                                                     </div>
                                                 </div>

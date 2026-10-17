@@ -474,7 +474,14 @@ export class UserCenterService extends BaseApiClient {
     action: 'add' | 'remove' | 'favorite' | 'unfavorite' | 'archive' | 'enable' | 'disable'
   ): Promise<UserStrategy> {
     if (action === 'favorite' || action === 'unfavorite') {
-      return this.post<UserStrategy>(`/strategies/${strategyId}/like`, {});
+      // 个人收藏：POST 置位 / DELETE 清除（幂等，仅属主可操作）
+      const url = `/strategies/${strategyId}/favorite`;
+      if (action === 'favorite') {
+        return this.post<UserStrategy>(url, {});
+      }
+      await this.delete<void>(url);
+      // DELETE 无返回体，调用方以本地取反更新状态
+      return { id: strategyId } as unknown as UserStrategy;
     }
     if (action === 'archive') {
       return this.updateStrategy(_userId, strategyId, { status: 'archived' });

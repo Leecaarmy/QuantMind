@@ -243,6 +243,95 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
 
     # ------------------------------------------------------------------
+    # set_favorite()
+    # ------------------------------------------------------------------
+
+    def _make_fav_service(self, has_column: bool = True):
+        svc = self._make_service(cos_available=False)
+        svc._has_favorite_col = has_column
+        return svc
+
+    async def test_set_favorite_returns_true_on_hit(self):
+        from contextlib import contextmanager
+
+        svc = self._make_fav_service(has_column=True)
+        mock_session = MagicMock()
+        mock_session.execute.return_value.fetchone.return_value = (42,)
+        captured = {}
+
+        orig_execute = mock_session.execute
+
+        def spy_execute(stmt, params=None):
+            captured["sql"] = str(stmt)
+            captured["params"] = params
+            return orig_execute(stmt, params)
+
+        mock_session.execute = spy_execute
+
+        @contextmanager
+        def fake_db_ctx():
+            yield mock_session
+
+        with (
+            patch("backend.shared.strategy_storage._ensure_int_user_id", return_value=1),
+            patch("backend.shared.strategy_storage.get_db", new=fake_db_ctx),
+        ):
+            result = await svc.set_favorite(strategy_id="42", user_id="1", favorite=True)
+
+        self.assertTrue(result)
+        self.assertIn("is_favorite", captured["sql"])
+        self.assertIn("user_id = :uid", captured["sql"])
+        self.assertTrue(captured["params"]["fav"])
+        self.assertEqual(captured["params"]["uid"], 1)
+
+    async def test_set_favorite_returns_false_when_not_found(self):
+        from contextlib import contextmanager
+
+        svc = self._make_fav_service(has_column=True)
+        mock_session = MagicMock()
+        mock_session.execute.return_value.fetchone.return_value = None
+
+        @contextmanager
+        def fake_db_ctx():
+            yield mock_session
+
+        with (
+            patch("backend.shared.strategy_storage._ensure_int_user_id", return_value=1),
+            patch("backend.shared.strategy_storage.get_db", new=fake_db_ctx),
+        ):
+            result = await svc.set_favorite(strategy_id=999, user_id="1", favorite=True)
+
+        self.assertFalse(result)
+
+    async def test_set_favorite_rejects_non_digit_without_db(self):
+        svc = self._make_fav_service(has_column=True)
+        with patch(
+            "backend.shared.strategy_storage.get_db",
+            side_effect=AssertionError("must not touch db"),
+        ):
+            result = await svc.set_favorite(strategy_id="sys_topk", user_id="1", favorite=True)
+        self.assertFalse(result)
+
+    async def test_set_favorite_missing_column_returns_false(self):
+        from contextlib import contextmanager
+
+        svc = self._make_fav_service(has_column=False)
+        mock_session = MagicMock()
+
+        @contextmanager
+        def fake_db_ctx():
+            yield mock_session
+
+        with (
+            patch("backend.shared.strategy_storage._ensure_int_user_id", return_value=1),
+            patch("backend.shared.strategy_storage.get_db", new=fake_db_ctx),
+        ):
+            result = await svc.set_favorite(strategy_id="42", user_id="1", favorite=True)
+
+        self.assertFalse(result)
+        mock_session.execute.assert_not_called()
+
+    # ------------------------------------------------------------------
     # 用户隔离
     # ------------------------------------------------------------------
 

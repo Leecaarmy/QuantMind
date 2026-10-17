@@ -13,6 +13,7 @@ import {
 import type { StrategyStatus } from '../types';
 import { TagSelector } from '../../../components/common/TagSelector';
 import { filterValidTags } from '../../../shared/types/strategyTags';
+import { strategyManagementService } from '../../../services/strategyManagementService';
 
 const { Search } = Input;
 const { TextArea } = Input;
@@ -41,6 +42,22 @@ const StrategiesPage: React.FC<StrategiesPageProps> = ({ userId }) => {
   } = useStrategies(userId);
 
   const { deleteStrategy, deleteStatus } = useDeleteStrategy(userId);
+  const [favBusyId, setFavBusyId] = useState<string | null>(null);
+
+  const handleToggleFavorite = async (strategy: any) => {
+    if (favBusyId) return;
+    const next = !strategy.is_favorite;
+    setFavBusyId(strategy.id);
+    try {
+      await strategyManagementService.setFavorite(strategy.id, next);
+      message.success(next ? '已收藏' : '已取消收藏');
+      refetch();
+    } catch (err: any) {
+      message.error(err.message || '收藏操作失败');
+    } finally {
+      setFavBusyId(null);
+    }
+  };
 
   const handleDeleteClick = (strategy: any) => {
     setStrategyToDelete(strategy);
@@ -125,11 +142,19 @@ const StrategiesPage: React.FC<StrategiesPageProps> = ({ userId }) => {
       width: 240,
       render: (text: string, record: any) => (
         <div className="flex items-center gap-2">
-          {record.is_favorite ? (
-            <StarFilled className="text-amber-400 text-xs" />
-          ) : (
-            <StarOutlined className="text-slate-200 text-xs" />
-          )}
+          <button
+            type="button"
+            title={record.is_favorite ? '取消收藏' : '收藏'}
+            disabled={favBusyId === record.id}
+            onClick={(e) => { e.stopPropagation(); handleToggleFavorite(record); }}
+            className="p-0.5 rounded hover:bg-amber-50 disabled:opacity-50"
+          >
+            {record.is_favorite ? (
+              <StarFilled className="text-amber-400 text-xs" />
+            ) : (
+              <StarOutlined className="text-slate-200 text-xs" />
+            )}
+          </button>
           <span className="font-bold text-slate-700">{text}</span>
         </div>
       ),

@@ -19,6 +19,7 @@ import {
     RefreshCw,
     Edit,
     AlertTriangle,
+    Star,
 } from 'lucide-react';
 import { message, Modal } from 'antd';
 import { strategyManagementService } from '../../services/strategyManagementService';
@@ -31,6 +32,7 @@ interface Strategy {
     status: 'draft' | 'repository' | 'live_trading' | 'active' | 'inactive' | 'archived';
     created_at: string;
     updated_at: string;
+    is_favorite?: boolean;
     validated_backtest_id?: number;
     promoted_at?: string;
     live_trading_started_at?: string;
@@ -74,6 +76,7 @@ export const StrategyManagementModule: React.FC = () => {
                 status: normalizeStatus(item.status),
                 created_at: item.created_at || new Date().toISOString(),
                 updated_at: item.updated_at || item.created_at || new Date().toISOString(),
+                is_favorite: !!item.is_favorite,
                 validated_backtest_id: item.validated_backtest_id,
                 promoted_at: item.promoted_at,
                 live_trading_started_at: item.live_trading_started_at,
@@ -131,9 +134,14 @@ export const StrategyManagementModule: React.FC = () => {
         }
     };
 
-    const filteredStrategies = strategies.filter((s) =>
-        s.name.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    const filteredStrategies = strategies
+        .filter((s) =>
+            s.name.toLowerCase().includes(searchTerm.toLowerCase())
+        )
+        // 收藏置顶，其次按更新时间倒序
+        .sort((a, b) =>
+            Number(b.is_favorite ?? false) - Number(a.is_favorite ?? false)
+        );
 
     const getStatusBadge = (status: Strategy['status']) => {
         const configs: any = {
@@ -198,6 +206,9 @@ export const StrategyManagementModule: React.FC = () => {
                                 <div className="flex items-start justify-between mb-3">
                                     <div className="flex-1">
                                         <div className="flex items-center gap-3 mb-2">
+                                            {strategy.is_favorite && (
+                                                <Star className="w-4 h-4 text-amber-400" fill="currentColor" />
+                                            )}
                                             <h3 className="text-sm font-semibold text-slate-700 tracking-tight">{strategy.name}</h3>
                                             {getStatusBadge(strategy.status)}
                                         </div>

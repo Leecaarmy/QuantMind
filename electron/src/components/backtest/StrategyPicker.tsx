@@ -17,6 +17,7 @@ import {
   Trash2,
   RefreshCw,
   ChevronRight,
+  Star,
 } from 'lucide-react';
 import { strategyManagementService } from '../../services/strategyManagementService';
 import { StrategyFile, StrategyValidationResult } from '../../types/backtest/strategy';
@@ -189,6 +190,10 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
     setIsLoading(true);
     try {
       const strategies = await strategyManagementService.loadStrategies();
+      // 收藏置顶，其次按更新时间倒序
+      strategies.sort((a, b) =>
+        Number(b.is_favorite ?? false) - Number(a.is_favorite ?? false)
+      );
       setPersonalStrategies(strategies);
     } catch (error: any) {
       console.error('加载策略失败:', error);
@@ -492,6 +497,9 @@ export const StrategyPicker: React.FC<StrategyPickerProps> = ({
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
                           <FileCode className="w-4 h-4 text-gray-600" />
+                          {strategy.is_favorite && (
+                            <Star className="w-3.5 h-3.5 text-amber-400" fill="currentColor" />
+                          )}
                           <span className="text-sm font-medium text-gray-800">
                             {strategy.name}
                           </span>

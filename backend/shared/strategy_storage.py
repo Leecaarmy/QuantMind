@@ -214,6 +214,7 @@ class StrategyStorageService:
     def __init__(self) -> None:
         self._cos: TencentCOSService | None = None
         self._has_cos_key_col: bool | None = None
+        self._has_favorite_col: bool | None = None
         self._init_cos()
 
     def _has_cos_key_column(self, session) -> bool:
@@ -235,6 +236,26 @@ class StrategyStorageService:
             logger.warning(f"探测 strategies.cos_key 失败，按不存在处理: {e}")
             self._has_cos_key_col = False
         return bool(self._has_cos_key_col)
+
+    def _has_favorite_column(self, session) -> bool:
+        """兼容旧库：运行时探测 strategies.is_favorite 是否存在并缓存。"""
+        if self._has_favorite_col is not None:
+            return self._has_favorite_col
+        try:
+            exists = session.execute(
+                text("""
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = 'strategies' AND column_name = 'is_favorite'
+                    )
+                    """)
+            ).scalar()
+            self._has_favorite_col = bool(exists)
+        except Exception as e:
+            logger.warning(f"探测 strategies.is_favorite 失败，按不存在处理: {e}")
+            self._has_favorite_col = False
+        return bool(self._has_favorite_col)
 
     def _init_cos(self) -> None:
         if TencentCOSService is None:
@@ -473,6 +494,7 @@ class StrategyStorageService:
                             "signal": "<PRED>",
                         },
                         "tags": ["system", "template"],
+                        "is_favorite": False,
                     }
             except Exception as e:
                 logger.warning(f"加载系统模板 {strategy_id} 失败: {e}")
@@ -484,11 +506,13 @@ class StrategyStorageService:
         with get_db() as session:
             has_cos_key = self._has_cos_key_column(session)
             cos_key_expr = "cos_key" if has_cos_key else "NULL::text as cos_key"
+            has_fav = self._has_favorite_column(session)
+            fav_expr = "is_favorite" if has_fav else "FALSE as is_favorite"
             sql = f"""
                 SELECT id, user_id, name, description, strategy_type, status,
                        config, parameters, code, cos_url, {cos_key_expr}, 
                        code_hash, file_size, tags, is_public, created_at, updated_at,
-                       is_verified, execution_config
+                       is_verified, execution_config, {fav_expr}
                 FROM strategies
                 WHERE id = :sid AND status != '{_STATUS_ARCHIVED}'
             """
@@ -513,6 +537,7 @@ class StrategyStorageService:
                 "execution_config": row[18] or {},
                 "tags": _parse_tags(row[13]),
                 "parameters": row[7] or {},
+                "is_favorite": bool(row[19]),
             }
 
     async def rename(self, user_id: str, strategy_id: str, name: str) -> bool:
@@ -552,6 +577,33 @@ class StrategyStorageService:
                 },
             )
             return True
+
+    async def set_favorite(
+        self, strategy_id: str, user_id: str, favorite: bool
+    ) -> bool:
+        """设置个人收藏状态（幂等）。仅允许操作自己的策略；命中返回 True。"""
+        if not str(strategy_id).isdigit():
+            return False
+        uid_int = _ensure_int_user_id(user_id)
+        with get_db() as session:
+            if not self._has_favorite_column(session):
+                logger.warning("strategies.is_favorite 列缺失，收藏将被忽略")
+                return False
+            row = session.execute(
+                text(
+                    "UPDATE strategies SET is_favorite = :fav, updated_at = :now "
+                    "WHERE id = :sid AND user_id = :uid "
+                    f"AND status != '{_STATUS_ARCHIVED}' "
+                    "RETURNING id"
+                ),
+                {
+                    "fav": bool(favorite),
+                    "sid": int(strategy_id),
+                    "uid": uid_int,
+                    "now": datetime.now(timezone.utc),
+                },
+            ).fetchone()
+            return row is not None
 
     def update_lifecycle_status(
         self, strategy_id: Any, user_id: str, status: str
@@ -631,6 +683,10 @@ class StrategyStorageService:
         with get_db() as session:
             has_cos_key = self._has_cos_key_column(session)
             cos_key_expr = "cos_key" if has_cos_key else "NULL::text as cos_key"
+            has_fav = self._has_favorite_column(session)
+            fav_expr = (
+                "is_favorite" if has_fav else "FALSE as is_favorite"
+            )
             where = ["user_id = :uid", f"status != '{_STATUS_ARCHIVED}'"]
             params: dict[str, Any] = {"uid": uid_int}
             if category:
@@ -652,7 +708,7 @@ class StrategyStorageService:
             sql = f"""
                 SELECT id, name, description, status, cos_url, {cos_key_expr},
                        code_hash, tags, is_verified, execution_config, created_at, updated_at,
-                       parameters, config
+                       parameters, config, {fav_expr}
                 FROM strategies WHERE {where_sql} ORDER BY updated_at DESC
             """
             rows = session.execute(text(sql), params).fetchall()
@@ -670,6 +726,7 @@ class StrategyStorageService:
                     "updated_at": r[11].isoformat() if r[11] else None,
                     "parameters": r[12] or {},
                     "config": r[13] or {},
+                    "is_favorite": bool(r[14]),
                 }
                 for r in rows
             ]
@@ -695,6 +752,7 @@ class StrategyStorageService:
                                 "parameters": {"strategy_type": t.id},
                                 "config": {},
                                 "is_system": True,
+                                "is_favorite": False,
                             }
                         )
                 except Exception as e:

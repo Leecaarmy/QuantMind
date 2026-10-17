@@ -6,7 +6,9 @@ import {
     ReloadOutlined,
     RocketOutlined,
     ExperimentOutlined,
-    ExclamationCircleOutlined
+    ExclamationCircleOutlined,
+    StarOutlined,
+    StarFilled
 } from '@ant-design/icons';
 import { userCenterService } from '../services/userCenterService';
 import { strategyManagementService } from '../../../services/strategyManagementService';
@@ -33,6 +35,7 @@ const CloudStrategyManagement: React.FC = () => {
     const [loading, setLoading] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [strategies, setStrategies] = useState<UserStrategy[]>([]);
+    const [favBusyId, setFavBusyId] = useState<string | null>(null);
     const [pagination, setPagination] = useState({
         current: 1,
         pageSize: 10,
@@ -72,6 +75,24 @@ const CloudStrategyManagement: React.FC = () => {
     useEffect(() => {
         fetchStrategies();
     }, [user]);
+
+    const handleToggleFavorite = async (strategy: UserStrategy) => {
+        if (favBusyId) return;
+        const next = !strategy.is_favorite;
+        setFavBusyId(strategy.id);
+        // 乐观更新，失败回滚
+        const prevFav = strategy.is_favorite;
+        setStrategies(strategies.map((s) => (s.id === strategy.id ? { ...s, is_favorite: next } : s)));
+        try {
+            await strategyManagementService.setFavorite(strategy.id, next);
+            message.success(next ? '已收藏' : '已取消收藏');
+        } catch (error: any) {
+            setStrategies(strategies.map((s) => (s.id === strategy.id ? { ...s, is_favorite: prevFav } : s)));
+            message.error('收藏操作失败: ' + error.message);
+        } finally {
+            setFavBusyId(null);
+        }
+    };
 
     const handleDelete = (strategy: UserStrategy) => {
         confirm({
@@ -160,6 +181,24 @@ const CloudStrategyManagement: React.FC = () => {
             dataIndex: 'created_at',
             key: 'created_at',
             render: (text: string) => formatCreatedAt(text),
+        },
+        {
+            title: '收藏',
+            dataIndex: 'is_favorite',
+            key: 'is_favorite',
+            width: 70,
+            render: (_: any, record: UserStrategy) => (
+                <Tooltip title={record.is_favorite ? '取消收藏' : '收藏'}>
+                    <Button
+                        type="text"
+                        loading={favBusyId === record.id}
+                        icon={record.is_favorite
+                            ? <StarFilled style={{ color: '#f59e0b' }} />
+                            : <StarOutlined style={{ color: '#cbd5e1' }} />}
+                        onClick={() => handleToggleFavorite(record)}
+                    />
+                </Tooltip>
+            ),
         },
         {
             title: '操作',
