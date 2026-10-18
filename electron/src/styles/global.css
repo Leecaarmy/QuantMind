@@ -1093,3 +1093,11 @@ html.platform-win32.os-win10 .module-grid-container {
 .rolling-row-changed:hover > td {
   background: rgba(219, 234, 254, 0.9) !important;
 }
+
+/* ── 手动任务向导页（ManualTaskPage）──
+   Outfit 在 10~12px 小字号下笔画偏细，密集表格场景改用 Inter + Noto Sans SC，
+   中文回退到系统黑体，保证小字清晰可读。 */
+.manual-task-typography {
+  font-family: 'Inter', 'Noto Sans SC', ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+}

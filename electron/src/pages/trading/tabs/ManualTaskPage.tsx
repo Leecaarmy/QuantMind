@@ -23,6 +23,7 @@ import {
     extractModelType, 
 } from '../../modelRegistryUtils';
 import { normalizeSymbol, splitSuffixCode } from '../../../utils/portfolioUtils';
+import { loadStockNameIndex, lookupStockName } from '../../../services/marketDataService';
 import type {
     ManualExecutionLogEntry,
     ManualExecutionLogSnapshot,
@@ -104,7 +105,7 @@ const stageLabel = (value?: string | null) => STAGE_LABELS[String(value || '').t
 const statusTone = (index: number, currentStep: number) => {
     if (index < currentStep) return 'border-emerald-200 bg-emerald-50 text-emerald-700';
     if (index === currentStep) return 'border-blue-200 bg-blue-50 text-blue-700';
-    return 'border-gray-200 bg-white text-gray-400';
+    return 'border-gray-200 bg-white text-gray-500';
 };
 
 const renderMoney = (value?: number) => {
@@ -118,7 +119,13 @@ const modelDisplayName = (model: any) => {
     return (meta.display_name || meta.model_name || model.model_id) as string;
 };
 
-const renderOrderCard = (order: ManualExecutionPreviewOrder, tone: 'buy' | 'sell') => (
+const renderOrderCard = (
+    order: ManualExecutionPreviewOrder,
+    tone: 'buy' | 'sell',
+    nameIndex: Map<string, string> | null,
+) => {
+    const stockName = lookupStockName(nameIndex, order.symbol);
+    return (
     <div
         key={`${order.side}-${order.symbol}-${order.quantity}`}
         className={`group relative overflow-hidden rounded-xl border transition-all duration-300 hover:shadow-md ${
@@ -131,49 +138,55 @@ const renderOrderCard = (order: ManualExecutionPreviewOrder, tone: 'buy' | 'sell
         <div className="p-3">
             <div className="flex items-center justify-between gap-2.5 mb-2.5">
                 <div className="flex items-center gap-2">
-                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-[10px] ${tone === 'sell' ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600'}`}>
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-[12px] ${tone === 'sell' ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600'}`}>
                         {tone === 'sell' ? 'S' : 'B'}
                     </div>
-                    <div>
-                        <div className="font-mono text-xs font-bold text-gray-900 leading-none">{order.symbol}</div>
-                        <div className="text-[9px] text-gray-400 mt-1 uppercase tracking-tighter">{order.reason || (tone === 'sell' ? 'EXIT' : 'ENTRY')}</div>
+                    <div className="min-w-0">
+                        <div className="flex items-baseline gap-1.5 leading-none">
+                            <span className="font-mono text-xs font-bold text-gray-900">{order.symbol}</span>
+                            {stockName && (
+                                <span className="text-[12px] font-bold text-gray-500 truncate">{stockName}</span>
+                            )}
+                        </div>
+                        <div className="text-[11px] text-gray-500 mt-1 uppercase tracking-tighter truncate">{order.reason || (tone === 'sell' ? 'EXIT' : 'ENTRY')}</div>
                     </div>
                 </div>
-                <Tag color={tone === 'sell' ? 'volcano' : 'cyan'} bordered={false} className="m-0 text-[10px] font-bold px-1.5 py-0 rounded-md">
+                <Tag color={tone === 'sell' ? 'volcano' : 'cyan'} bordered={false} className="m-0 text-[12px] font-bold px-1.5 py-0 rounded-md">
                     {order.side}
                 </Tag>
             </div>
             
-            <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-2.5 border-t border-gray-50 text-[10px]">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-2.5 border-t border-gray-50 text-[12px]">
                 <div className="flex flex-col">
-                    <span className="text-gray-400 font-bold uppercase tracking-tighter">数量</span>
+                    <span className="text-gray-500 font-bold uppercase tracking-tighter">数量</span>
                     <span className="font-mono text-gray-900 font-bold">{order.quantity.toLocaleString()}</span>
                 </div>
                 <div className="flex flex-col">
-                    <span className="text-gray-400 font-bold uppercase tracking-tighter">委托</span>
+                    <span className="text-gray-500 font-bold uppercase tracking-tighter">委托</span>
                     <span className="font-mono text-gray-900 font-bold">{order.order_type}</span>
                 </div>
                 <div className="flex flex-col">
-                    <span className="text-gray-400 font-bold uppercase tracking-tighter">目标价</span>
+                    <span className="text-gray-500 font-bold uppercase tracking-tighter">目标价</span>
                     <span className="font-mono text-blue-600 font-bold">
-                        {order.price === 0 ? <span className="text-gray-400 font-medium">未获取</span> : renderMoney(order.price)}
+                        {order.price === 0 ? <span className="text-gray-500 font-medium">未获取</span> : renderMoney(order.price)}
                     </span>
                 </div>
                 <div className="flex flex-col">
-                    <span className="text-gray-400 font-bold uppercase tracking-tighter">预估金额</span>
+                    <span className="text-gray-500 font-bold uppercase tracking-tighter">预估金额</span>
                     <span className="font-mono text-gray-900 font-bold">
-                        {order.price === 0 ? <span className="text-gray-300">--</span> : renderMoney(order.estimated_notional)}
+                        {order.price === 0 ? <span className="text-gray-400">--</span> : renderMoney(order.estimated_notional)}
                     </span>
                 </div>
             </div>
 
-            <div className="mt-2.5 flex items-center justify-between bg-gray-50/50 rounded-lg p-2 text-[9px] font-medium">
-                <span className="text-gray-400">持仓: <span className="text-gray-700">{order.current_volume ?? 0}</span></span>
-                <span className="text-gray-400">Ref: {order.reference_price === 0 ? '未获取' : renderMoney(order.reference_price)}</span>
+            <div className="mt-2.5 flex items-center justify-between bg-gray-50/50 rounded-lg p-2 text-[11px] font-medium">
+                <span className="text-gray-500">持仓: <span className="text-gray-700">{order.current_volume ?? 0}</span></span>
+                <span className="text-gray-500">Ref: {order.reference_price === 0 ? '未获取' : renderMoney(order.reference_price)}</span>
             </div>
         </div>
     </div>
-);
+    );
+};
 
 const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
@@ -215,6 +228,8 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
 
     const [modelSearch, setModelSearch] = useState('');
     const [strategySearch, setStrategySearch] = useState('');
+    // 股票名称映射（data/stocks/stocks_index.json，经后端 /api/v1/stocks/index-file 提供）
+    const [stockNameIndex, setStockNameIndex] = useState<Map<string, string> | null>(null);
 
     const filteredModelOptions = useMemo(() => {
         const q = modelSearch.toLowerCase().trim();
@@ -362,6 +377,20 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
     }, [loadModels, loadStrategies]);
 
     useEffect(() => {
+        let alive = true;
+        loadStockNameIndex()
+            .then((index) => {
+                if (alive) setStockNameIndex(index);
+            })
+            .catch(() => {
+                /* 名称索引不可用时降级为只显示代码 */
+            });
+        return () => {
+            alive = false;
+        };
+    }, []);
+
+    useEffect(() => {
         if (effectiveModelId) {
             void loadRuns(1);
         }
@@ -494,7 +523,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
     const previewTaskSummary = (selectedTask?.result_json as Record<string, unknown> | undefined)?.preview_summary as Record<string, unknown> | undefined;
 
     return (
-        <div className="h-full overflow-y-auto bg-gray-50 p-4 custom-scrollbar">
+        <div className="manual-task-typography h-full overflow-y-auto bg-gray-50 p-4 custom-scrollbar">
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                     <div className="p-2 rounded-xl bg-blue-50 text-blue-600">
@@ -502,7 +531,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                     </div>
                     <div>
                         <div className="text-lg font-bold text-gray-900">手动任务</div>
-                        <div className="text-[11px] text-gray-500 font-medium">采用 5 步向导式执行流程，经由 Hash 核对后推送至交易执行引擎</div>
+                        <div className="text-[12px] text-gray-500 font-medium">采用 5 步向导式执行流程，经由 Hash 核对后推送至交易执行引擎</div>
                     </div>
                 </div>
                 <div className="flex items-center gap-3">
@@ -573,7 +602,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                         }}
                         className={`rounded-xl border px-3 py-1.5 text-left transition-all ${statusTone(index, currentStep)}`}
                     >
-                        <div className="text-[9px] font-bold uppercase tracking-wider opacity-60">Step {index + 1}</div>
+                        <div className="text-[11px] font-bold uppercase tracking-wider opacity-60">Step {index + 1}</div>
                         <div className="mt-0.5 text-xs font-bold truncate">{title}</div>
                     </button>
                 ))}
@@ -592,7 +621,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                     </h2>
                                     <div className="relative">
                                         <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-                                            <Search className="text-gray-400" size={13} />
+                                            <Search className="text-gray-500" size={13} />
                                         </div>
                                         <input
                                             type="text"
@@ -621,31 +650,31 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             >
                                                 <div className="flex items-center justify-between mb-1.5 w-full overflow-hidden">
                                                     <div className="flex items-center gap-2 truncate">
-                                                        <span className={`text-[11px] font-black truncate ${isActive ? 'text-blue-950' : 'text-slate-800'}`}>
+                                                        <span className={`text-[12px] font-black truncate ${isActive ? 'text-blue-950' : 'text-slate-800'}`}>
                                                             {name}
                                                         </span>
                                                         {isActive && <CheckCircle2 size={12} className="text-blue-500 shrink-0" />}
                                                     </div>
                                                     <span className="shrink-0 flex items-center gap-1">
-                                                        <span className={`px-1.5 rounded text-[8px] font-black uppercase tracking-tighter ${isActive ? 'bg-blue-500 text-white' : 'bg-blue-50 text-blue-500'}`}>
+                                                        <span className={`px-1.5 rounded text-[10px] font-black uppercase tracking-tighter ${isActive ? 'bg-blue-500 text-white' : 'bg-blue-50 text-blue-500'}`}>
                                                             {extractModelType(model)}
                                                         </span>
                                                         <UserIcon size={10} className={isActive ? 'text-blue-500' : 'text-blue-300'} />
                                                     </span>
                                                 </div>
                                                 <div className="flex items-center justify-between w-full">
-                                                    <div className={`font-mono text-[9px] truncate tracking-tight ${isActive ? 'text-blue-800/70' : 'text-slate-400'}`}>
+                                                    <div className={`font-mono text-[11px] truncate tracking-tight ${isActive ? 'text-blue-800/70' : 'text-slate-500'}`}>
                                                         ID: {model.model_id.slice(-8).toUpperCase()}
                                                     </div>
-                                                    <div className={`text-[9px] font-bold ${isActive ? 'text-blue-700' : 'text-blue-500/60'}`}>
+                                                    <div className={`text-[11px] font-bold ${isActive ? 'text-blue-700' : 'text-blue-600'}`}>
                                                         T+{Number(getMeta(model).target_horizon_days ?? getMeta(model).horizon_days ?? 5)}
                                                     </div>
                                                 </div>
                                                 <div className="mt-2.5 flex items-center gap-1.5">
-                                                    <Tag bordered={false} className={`m-0 text-[8px] px-2 py-0 rounded-md font-bold ${isActive ? 'bg-blue-50 text-blue-600' : 'bg-gray-100 text-gray-500'}`}>
+                                                    <Tag bordered={false} className={`m-0 text-[10px] px-2 py-0 rounded-md font-bold ${isActive ? 'bg-blue-50 text-blue-600' : 'bg-gray-100 text-gray-500'}`}>
                                                         私有
                                                     </Tag>
-                                                    <span className={`text-[8px] font-bold uppercase tracking-wider ${isActive ? 'text-blue-600/40' : 'text-gray-400'}`}>
+                                                    <span className={`text-[10px] font-bold uppercase tracking-wider ${isActive ? 'text-blue-700/80' : 'text-gray-500'}`}>
                                                         {extractModelType(model as any)}
                                                     </span>
                                                 </div>
@@ -653,8 +682,8 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                         );
                                     })}
                                     {filteredModelOptions.length === 0 && (
-                                        <div className="py-20 text-center text-gray-400">
-                                            <Empty description={<span className="text-[10px]">未找到匹配模型</span>} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                                        <div className="py-20 text-center text-gray-500">
+                                            <Empty description={<span className="text-[12px]">未找到匹配模型</span>} image={Empty.PRESENTED_IMAGE_SIMPLE} />
                                         </div>
                                     )}
                                 </div>
@@ -671,27 +700,27 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                 <h2 className="text-xl font-bold text-gray-900">
                                                     {modelDisplayName(selectedModelObject as any)}
                                                 </h2>
-                                                <Tag color="blue" bordered={false} className="m-0 text-[10px] font-black rounded-md px-2 py-0.5 uppercase tracking-wider">
+                                                <Tag color="blue" bordered={false} className="m-0 text-[12px] font-black rounded-md px-2 py-0.5 uppercase tracking-wider">
                                                     {extractModelType(selectedModelObject as any)}
                                                 </Tag>
-                                                <Tag color="default" bordered={false} className="m-0 text-[10px] font-bold rounded-md px-2 py-0.5 uppercase tracking-wider bg-gray-100 text-gray-500">
+                                                <Tag color="default" bordered={false} className="m-0 text-[12px] font-bold rounded-md px-2 py-0.5 uppercase tracking-wider bg-gray-100 text-gray-500">
                                                     {String(getMeta(selectedModelObject as any).data_source || '全局数据')}
                                                 </Tag>
-                                                <Tag color="purple" bordered={false} className="m-0 text-[10px] font-bold rounded-md px-2 py-0.5 uppercase tracking-wider bg-purple-50 text-purple-600">
+                                                <Tag color="purple" bordered={false} className="m-0 text-[12px] font-bold rounded-md px-2 py-0.5 uppercase tracking-wider bg-purple-50 text-purple-600">
                                                     {String(getMeta(selectedModelObject as any).freq || 'Daily')}
                                                 </Tag>
                                             </div>
-                                            <div className="text-xs text-gray-400 font-mono flex flex-wrap items-center justify-center gap-2">
+                                            <div className="text-xs text-gray-500 font-mono flex flex-wrap items-center justify-center gap-2">
                                                 <span className="bg-gray-50 px-1.5 py-0.5 rounded text-gray-500 border border-gray-100">{selectedModelObject.model_id}</span>
                                                 <span>创建于 {dayjs(selectedModelObject.created_at).format('YYYY-MM-DD')}</span>
                                                 <span className="text-gray-200">|</span>
-                                                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{String(getMeta(selectedModelObject as any).version || 'v1.0.0')}</span>
+                                                <span className="text-[12px] font-bold text-gray-500 uppercase tracking-widest">{String(getMeta(selectedModelObject as any).version || 'v1.0.0')}</span>
                                             </div>
                                             <div className="flex flex-col items-center gap-1.5 mt-3">
-                                                <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">当前状态</div>
+                                                <div className="text-[12px] font-bold text-gray-500 uppercase tracking-widest">当前状态</div>
                                                 <div className="flex items-center gap-2 px-3 py-1 bg-emerald-50 border border-emerald-100 rounded-full">
                                                     <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                                                    <span className="text-[10px] font-bold text-emerald-600 uppercase">Deployed / Ready</span>
+                                                    <span className="text-[12px] font-bold text-emerald-600 uppercase">Deployed / Ready</span>
                                                 </div>
                                             </div>
                                         </div>
@@ -703,11 +732,11 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             if (!formula) return null;
                                             return (
                                                 <div className="mb-6 p-3 rounded-xl bg-slate-900 border border-slate-800 shadow-inner group transition-all hover:bg-slate-800">
-                                                    <div className="flex items-center justify-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
+                                                    <div className="flex items-center justify-center gap-2 text-[12px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
                                                         <Target size={12} className="text-blue-400" />
                                                         预测目标 (Target Factor Formula)
                                                     </div>
-                                                    <code className="block text-center text-[11px] font-mono font-bold text-blue-300 break-all leading-relaxed">
+                                                    <code className="block text-center text-[12px] font-mono font-bold text-blue-300 break-all leading-relaxed">
                                                         {String(formula)}
                                                     </code>
                                                 </div>
@@ -725,21 +754,21 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                 return (
                                                     <>
                                                         <div className="rounded-2xl bg-blue-50/50 border border-blue-100/50 p-4 text-center">
-                                                            <div className="text-[10px] font-bold text-blue-500 uppercase tracking-widest mb-1">平均 IC</div>
+                                                            <div className="text-[12px] font-bold text-blue-500 uppercase tracking-widest mb-1">平均 IC</div>
                                                             <div className="text-xl font-black text-slate-800 font-mono tracking-tighter">
                                                                 {icVal?.toFixed(4) || '0.0000'}
                                                             </div>
                                                         </div>
 
                                                         <div className="rounded-2xl bg-indigo-50/50 border border-indigo-100/50 p-4 text-center">
-                                                            <div className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest mb-1">Rank IC</div>
+                                                            <div className="text-[12px] font-bold text-indigo-500 uppercase tracking-widest mb-1">Rank IC</div>
                                                             <div className="text-xl font-black text-slate-800 font-mono tracking-tighter">
                                                                 {rankIcVal?.toFixed(4) || icVal?.toFixed(4) || '0.0000'}
                                                             </div>
                                                         </div>
 
                                                         <div className="rounded-2xl bg-emerald-50/50 border border-emerald-100/50 p-4 text-center">
-                                                            <div className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest mb-1">ICIR (稳定度)</div>
+                                                            <div className="text-[12px] font-bold text-emerald-500 uppercase tracking-widest mb-1">ICIR (稳定度)</div>
                                                             <div className="text-xl font-black text-slate-800 font-mono tracking-tighter">
                                                                 {icirVal?.toFixed(3) || '0.000'}
                                                             </div>
@@ -759,18 +788,18 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                     if (features.length === 0) return null;
                                                     return (
                                                         <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/60 overflow-hidden flex flex-col">
-                                                            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center justify-center gap-2">
+                                                            <div className="text-[12px] font-bold text-slate-500 uppercase tracking-widest mb-3 flex items-center justify-center gap-2">
                                                                 <Database size={12} className="text-blue-500" />
                                                                 特征因子 (Top 5)
                                                             </div>
                                                             <div className="flex flex-wrap justify-center gap-1.5">
                                                                 {features.slice(0, 5).map(f => (
-                                                                    <span key={f} className="px-2 py-0.5 rounded-md bg-white border border-slate-100 text-[10px] font-mono text-slate-600 font-bold truncate max-w-full">
+                                                                    <span key={f} className="px-2 py-0.5 rounded-md bg-white border border-slate-100 text-[12px] font-mono text-slate-600 font-bold truncate max-w-full">
                                                                         {f}
                                                                     </span>
                                                                 ))}
                                                                 {features.length > 5 && (
-                                                                    <span className="text-[10px] text-slate-300 font-bold">+{features.length - 5}</span>
+                                                                    <span className="text-[12px] text-slate-500 font-bold">+{features.length - 5}</span>
                                                                 )}
                                                             </div>
                                                         </div>
@@ -783,19 +812,19 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                     if (!periods) return null;
                                                     return (
                                                         <div className="p-4 rounded-2xl bg-indigo-50/20 border border-indigo-100/50">
-                                                            <div className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest mb-3 flex items-center justify-center gap-2">
+                                                            <div className="text-[12px] font-bold text-indigo-400 uppercase tracking-widest mb-3 flex items-center justify-center gap-2">
                                                                 <Calendar size={12} />
                                                                 数据周期
                                                             </div>
                                                             <div className="space-y-2">
                                                                 <div className="flex items-center justify-center gap-3">
-                                                                    <span className="text-[9px] font-bold text-slate-400 uppercase">训练</span>
-                                                                    <span className="text-[10px] font-mono text-blue-700 font-black">{periods.train[0].slice(2)} → {periods.train[1].slice(2)}</span>
+                                                                    <span className="text-[11px] font-bold text-slate-500 uppercase">训练</span>
+                                                                    <span className="text-[12px] font-mono text-blue-700 font-black">{periods.train[0].slice(2)} → {periods.train[1].slice(2)}</span>
                                                                 </div>
                                                                 {periods.test && (
                                                                     <div className="flex items-center justify-center gap-3">
-                                                                        <span className="text-[9px] font-bold text-slate-400 uppercase">测试</span>
-                                                                        <span className="text-[10px] font-mono text-emerald-700 font-black">{periods.test[0].slice(2)} → {periods.test[1].slice(2)}</span>
+                                                                        <span className="text-[11px] font-bold text-slate-500 uppercase">测试</span>
+                                                                        <span className="text-[12px] font-mono text-emerald-700 font-black">{periods.test[0].slice(2)} → {periods.test[1].slice(2)}</span>
                                                                     </div>
                                                                 )}
                                                             </div>
@@ -805,18 +834,18 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             </div>
 
                                             <div className="p-4 rounded-2xl bg-gray-50/50 border border-gray-100">
-                                                <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2 flex items-center justify-center gap-2">
+                                                <div className="text-[12px] font-bold text-gray-500 uppercase tracking-widest mb-2 flex items-center justify-center gap-2">
                                                     <Search size={12} />
                                                     模型描述与适用场景
                                                 </div>
-                                                <div className="text-[11px] text-gray-600 leading-relaxed italic text-center">
+                                                <div className="text-[12px] text-gray-600 leading-relaxed italic text-center">
                                                     {String(getMeta(selectedModelObject as any).description || '暂无详细描述。该模型专为 A 股市场 T+N 调仓场景设计，采用了 Qlib 工业级特征工程，在回测期内表现稳健。')}
                                                 </div>
                                             </div>
 
                                             <div className="grid grid-cols-2 gap-3">
                                                 <div className="flex flex-col items-center gap-1.5">
-                                                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">特征维度</span>
+                                                    <span className="text-[12px] font-bold text-gray-500 uppercase tracking-widest">特征维度</span>
                                                     <div className="text-xs font-bold text-gray-800 flex items-center gap-2">
                                                         <Cpu size={14} className="text-blue-500" />
                                                         {(() => {
@@ -826,7 +855,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                     </div>
                                                 </div>
                                                 <div className="flex flex-col items-center gap-1.5">
-                                                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">预测周期</span>
+                                                    <span className="text-[12px] font-bold text-gray-500 uppercase tracking-widest">预测周期</span>
                                                     <div className="text-xs font-bold text-gray-800 flex items-center gap-2">
                                                         <Clock size={14} className="text-amber-500" />
                                                         T+{(() => {
@@ -840,7 +869,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                         <div className="mt-auto pt-6 border-t border-gray-50 flex items-center justify-center">
                                             <div className="flex items-center gap-2">
                                                 <Sparkles className="text-amber-400" size={16} />
-                                                <p className="text-[11px] text-gray-400 font-medium">只有处于 READY 状态的模型可产生有效信号</p>
+                                                <p className="text-[12px] text-gray-500 font-medium">只有处于 READY 状态的模型可产生有效信号</p>
                                             </div>
                                         </div>
                                         </div>
@@ -852,7 +881,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                         </div>
                                         <div>
                                             <h3 className="font-bold text-gray-900">请选择左侧模型</h3>
-                                            <p className="text-xs text-gray-400 mt-1 max-w-[240px]">
+                                            <p className="text-xs text-gray-500 mt-1 max-w-[240px]">
                                                 选择一个推理模型以查看其详细性能指标与运行轨迹。
                                             </p>
                                         </div>
@@ -882,7 +911,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                 <div className="flex flex-col md:flex-row gap-2">
                                     <div className="flex-[3] relative">
                                         <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-                                            <Search className="text-gray-400" size={13} />
+                                            <Search className="text-gray-500" size={13} />
                                         </div>
                                         <Input 
                                             value={runIdQuery} 
@@ -908,7 +937,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             <History size={14} className="text-blue-500" />
                                             推理批次历史
                                         </div>
-                                        <div className="text-[10px] font-bold text-gray-400 bg-gray-100/50 px-2 py-0.5 rounded-md">Total: {total}</div>
+                                        <div className="text-[12px] font-bold text-gray-500 bg-gray-100/50 px-2 py-0.5 rounded-md">Total: {total}</div>
                                     </div>
                                     
                                     <div className="max-h-[360px] overflow-y-auto grid grid-cols-2 gap-3 p-1.5 custom-scrollbar">
@@ -931,21 +960,21 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                     }`}
                                                 >
                                                     <div className="flex items-center justify-between gap-2 mb-2 w-full">
-                                                        <div className={`font-mono text-[10px] font-bold truncate ${active ? 'text-blue-900' : 'text-slate-600'}`}>
+                                                        <div className={`font-mono text-[12px] font-bold truncate ${active ? 'text-blue-900' : 'text-slate-600'}`}>
                                                             {run.run_id.slice(-12).toUpperCase()}
                                                         </div>
-                                                        <Tag color={active ? 'blue' : 'default'} bordered={false} className="m-0 text-[8px] px-1 py-0 rounded-md font-bold shrink-0">
+                                                        <Tag color={active ? 'blue' : 'default'} bordered={false} className="m-0 text-[10px] px-1 py-0 rounded-md font-bold shrink-0">
                                                             {run.status}
                                                         </Tag>
                                                     </div>
                                                     <div className="flex items-center justify-between w-full">
-                                                        <div className={`flex flex-col ${active ? 'text-blue-600' : 'text-gray-400'}`}>
-                                                            <span className="text-[8px] uppercase font-bold opacity-60">Trade Date</span>
-                                                            <span className="font-mono text-[10px] font-bold">{run.prediction_trade_date || run.target_date || '-'}</span>
+                                                        <div className={`flex flex-col ${active ? 'text-blue-600' : 'text-gray-500'}`}>
+                                                            <span className="text-[10px] uppercase font-bold opacity-60">Trade Date</span>
+                                                            <span className="font-mono text-[12px] font-bold">{run.prediction_trade_date || run.target_date || '-'}</span>
                                                         </div>
-                                                        <div className={`flex flex-col items-end ${active ? 'text-blue-600' : 'text-gray-400'}`}>
-                                                            <span className="text-[8px] uppercase font-bold opacity-60">Signals</span>
-                                                            <span className="font-mono text-[10px] font-bold">{run.signals_count ?? 0}</span>
+                                                        <div className={`flex flex-col items-end ${active ? 'text-blue-600' : 'text-gray-500'}`}>
+                                                            <span className="text-[10px] uppercase font-bold opacity-60">Signals</span>
+                                                            <span className="font-mono text-[12px] font-bold">{run.signals_count ?? 0}</span>
                                                         </div>
                                                     </div>
                                                 </button>
@@ -962,9 +991,9 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             <ArrowLeft size={14} />
                                         </button>
                                         <div className="flex items-center gap-1">
-                                            <span className="text-[10px] font-bold text-gray-900">PAGE {page}</span>
-                                            <span className="text-[10px] font-bold text-gray-300">/</span>
-                                            <span className="text-[10px] font-bold text-gray-300">{Math.ceil(total / 10) || 1}</span>
+                                            <span className="text-[12px] font-bold text-gray-900">PAGE {page}</span>
+                                            <span className="text-[12px] font-bold text-gray-500">/</span>
+                                            <span className="text-[12px] font-bold text-gray-500">{Math.ceil(total / 10) || 1}</span>
                                         </div>
                                         <button disabled={loadingRuns || page * 10 >= total} onClick={() => void loadRuns(page + 1)} className="p-1.5 rounded-lg border border-gray-100 text-gray-500 hover:bg-white disabled:opacity-30 transition-colors">
                                             <ArrowRight size={14} />
@@ -987,12 +1016,12 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                     ) : selectedRunDetail ? (
                                         <div className="flex-1 flex flex-col space-y-3 overflow-hidden">
                                             <div className="p-3 rounded-xl bg-white border border-gray-100 space-y-2 shadow-sm">
-                                                <div className="flex items-center justify-between text-[10px]">
-                                                    <span className="text-gray-400 font-bold uppercase shrink-0">Run ID</span>
+                                                <div className="flex items-center justify-between text-[12px]">
+                                                    <span className="text-gray-500 font-bold uppercase shrink-0">Run ID</span>
                                                     <span className="font-mono text-gray-900 font-bold truncate text-right">{selectedRunDetail.run_id}</span>
                                                 </div>
-                                                <div className="flex items-center justify-between text-[10px]">
-                                                    <span className="text-gray-400 font-bold uppercase">Target Date</span>
+                                                <div className="flex items-center justify-between text-[12px]">
+                                                    <span className="text-gray-500 font-bold uppercase">Target Date</span>
                                                     <span className="font-mono text-gray-900 font-bold">{selectedRunDetail.summary?.prediction_trade_date || '-'}</span>
                                                 </div>
                                             </div>
@@ -1001,12 +1030,17 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                 {selectedRunDetail.rankings.slice(0, 10).map((item) => (
                                                     <div key={`${item.code}-${item.rank}`} className="group flex items-center justify-between p-2.5 rounded-xl bg-white border border-gray-50 hover:border-blue-100 transition-colors shadow-sm">
                                                         <div className="flex items-center gap-3 flex-1 overflow-hidden">
-                                                            <div className="flex items-center justify-center min-w-[28px] h-7 rounded-lg bg-gray-50 text-[10px] font-bold text-gray-400 shrink-0">
+                                                            <div className="flex items-center justify-center min-w-[28px] h-7 rounded-lg bg-gray-50 text-[12px] font-bold text-gray-500 shrink-0">
                                                                 #{item.rank}
                                                             </div>
                                                             <div className="flex items-center justify-between flex-1 pr-1">
-                                                                    <div className="font-mono text-[11px] font-bold text-gray-900">{normalizeSymbol(item.code)}</div>
-                                                                    <div className="text-[9px] text-gray-400 uppercase tracking-tighter">Score: {item.score.toFixed(4)}</div>
+                                                                    <div className="flex items-baseline gap-1.5 min-w-0">
+                                                                        <span className="font-mono text-[12px] font-bold text-gray-900">{normalizeSymbol(item.code)}</span>
+                                                                        {lookupStockName(stockNameIndex, item.code) && (
+                                                                            <span className="text-[12px] font-bold text-gray-500 truncate">{lookupStockName(stockNameIndex, item.code)}</span>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="text-[11px] text-gray-500 uppercase tracking-tighter">Score: {item.score.toFixed(4)}</div>
                                                             </div>
                                                         </div>
                                                     </div>
@@ -1015,15 +1049,15 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                         </div>
                                     ) : (
                                         <div className="flex-1 flex flex-col items-center justify-center text-center space-y-3 opacity-30">
-                                            <div className="w-12 h-12 rounded-2xl bg-gray-100 flex items-center justify-center text-gray-400">
+                                            <div className="w-12 h-12 rounded-2xl bg-gray-100 flex items-center justify-center text-gray-500">
                                                 <Zap size={24} />
                                             </div>
-                                            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Select batch to view</p>
+                                            <p className="text-[12px] font-bold uppercase tracking-widest text-gray-500">Select batch to view</p>
                                         </div>
                                     )}
 
                                     <div className="mt-4">
-                                        <button type="button" onClick={() => setCurrentStep(0)} className="w-full py-2 text-[10px] font-bold text-gray-400 hover:text-gray-900 transition-colors uppercase tracking-widest text-center">
+                                        <button type="button" onClick={() => setCurrentStep(0)} className="w-full py-2 text-[12px] font-bold text-gray-500 hover:text-gray-900 transition-colors uppercase tracking-widest text-center">
                                             Back to Model
                                         </button>
                                     </div>
@@ -1044,7 +1078,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             第三步：绑定交易策略
                                             <Zap className="text-blue-500" size={18} />
                                         </h2>
-                                        <p className="text-[11px] text-gray-500 mt-0.5">
+                                        <p className="text-[12px] text-gray-500 mt-0.5">
                                             选定经过验证的策略，系统将基于推理信号生成调仓方案。
                                         </p>
                                     </div>
@@ -1052,7 +1086,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
 
                                 <div className="relative">
                                     <div className="absolute inset-y-0 left-3.5 flex items-center pointer-events-none">
-                                        <Search className="text-gray-400" size={16} />
+                                        <Search className="text-gray-500" size={16} />
                                     </div>
                                     <input
                                         type="text"
@@ -1081,8 +1115,8 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                 }`}
                                             >
                                                 {/* ID Badge */}
-                                                <div className={`flex items-center justify-center min-w-[32px] h-8 rounded-xl font-mono text-[10px] font-bold shrink-0 transition-colors ${
-                                                    isActive ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-100 text-gray-400'
+                                                <div className={`flex items-center justify-center min-w-[32px] h-8 rounded-xl font-mono text-[12px] font-bold shrink-0 transition-colors ${
+                                                    isActive ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-100 text-gray-500'
                                                 }`}>
                                                     #{strategy.id}
                                                 </div>
@@ -1099,7 +1133,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
 
                                                 {/* Type Tag & Status */}
                                                 <div className="flex items-center gap-2 shrink-0">
-                                                    <Tag color={strategy.is_system ? 'gold' : 'blue'} bordered={false} className="m-0 text-[8px] px-1.5 py-0 rounded-md font-black uppercase tracking-wider opacity-60">
+                                                    <Tag color={strategy.is_system ? 'gold' : 'blue'} bordered={false} className="m-0 text-[10px] px-1.5 py-0 rounded-md font-black uppercase tracking-wider opacity-60">
                                                         {strategy.is_system ? 'SYS' : 'USR'}
                                                     </Tag>
                                                     {isActive && (
@@ -1114,7 +1148,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                 </div>
 
                                 <div className="space-y-1.5">
-                                    <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1">执行备注</div>
+                                    <div className="text-[12px] font-bold text-gray-500 uppercase tracking-widest ml-1">执行备注</div>
                                     <Input.TextArea
                                         value={note}
                                         onChange={(e) => {
@@ -1138,17 +1172,17 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                     <div className="flex-1 space-y-4 font-bold">
                                         <div className="space-y-2">
                                             <div className="p-3.5 rounded-xl bg-white border border-gray-100 shadow-sm">
-                                                <div className="text-[9px] uppercase font-bold text-gray-400 mb-0.5">模型路径</div>
-                                                <div className="text-[11px] text-gray-900 truncate">{effectiveModelId}</div>
+                                                <div className="text-[11px] uppercase font-bold text-gray-500 mb-0.5">模型路径</div>
+                                                <div className="text-[12px] text-gray-900 truncate">{effectiveModelId}</div>
                                             </div>
                                             <div className="p-3.5 rounded-xl bg-white border border-gray-100 shadow-sm">
-                                                <div className="text-[9px] uppercase font-bold text-gray-400 mb-0.5">推理批次</div>
-                                                <div className="text-[11px] text-gray-900 truncate">{selectedRunId || '未选择'}</div>
+                                                <div className="text-[11px] uppercase font-bold text-gray-500 mb-0.5">推理批次</div>
+                                                <div className="text-[12px] text-gray-900 truncate">{selectedRunId || '未选择'}</div>
                                             </div>
                                         </div>
 
                                         <div className="p-4 rounded-xl bg-white border border-gray-100 shadow-sm">
-                                            <div className="font-bold text-[10px] text-gray-900 mb-2 flex items-center gap-1.5">
+                                            <div className="font-bold text-[12px] text-gray-900 mb-2 flex items-center gap-1.5">
                                                 <Settings2 size={12} />
                                                 参数集
                                             </div>
@@ -1156,19 +1190,19 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                 <div className="space-y-2.5 max-h-[120px] overflow-y-auto pr-1 custom-scrollbar">
                                                     {Object.entries(selectedStrategy.parameters).slice(0, 4).map(([key, value]) => (
                                                         <div key={key} className="flex flex-col">
-                                                            <div className="text-[9px] text-gray-400 font-bold uppercase tracking-tighter">{key}</div>
-                                                            <div className="text-[11px] font-mono text-blue-700 break-all">{String(value)}</div>
+                                                            <div className="text-[11px] text-gray-500 font-bold uppercase tracking-tighter">{key}</div>
+                                                            <div className="text-[12px] font-mono text-blue-700 break-all">{String(value)}</div>
                                                         </div>
                                                     ))}
                                                 </div>
                                             ) : (
-                                                <div className="text-[9px] text-gray-400 italic">默认配置</div>
+                                                <div className="text-[11px] text-gray-500 italic">默认配置</div>
                                             )}
                                         </div>
                                     </div>
 
                                     <div className="mt-4">
-                                        <button type="button" onClick={() => setCurrentStep(1)} className="w-full py-2 text-[10px] font-bold text-gray-400 hover:text-gray-900 transition-colors uppercase tracking-widest text-center">
+                                        <button type="button" onClick={() => setCurrentStep(1)} className="w-full py-2 text-[12px] font-bold text-gray-500 hover:text-gray-900 transition-colors uppercase tracking-widest text-center">
                                             Back to Data
                                         </button>
                                     </div>
@@ -1198,7 +1232,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             <Wand2 size={32} />
                                         </div>
                                         <h3 className="text-base font-bold text-gray-900 mb-1.5">生成预案以继续</h3>
-                                        <p className="text-xs text-gray-400 max-w-xs mb-6 font-medium">点击右侧按钮计算本次任务的具体委托细节。</p>
+                                        <p className="text-xs text-gray-500 max-w-xs mb-6 font-medium">点击右侧按钮计算本次任务的具体委托细节。</p>
                                         <button
                                             type="button"
                                             onClick={() => void generatePreview()}
@@ -1215,34 +1249,34 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                     <div className="space-y-6 animate-in fade-in duration-500">
                                         <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
                                             <div className="p-4 rounded-xl border border-gray-100 bg-gray-50/50">
-                                                <div className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                                <div className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 flex items-center gap-2">
                                                     <CreditCard size={12} className="text-blue-500" />
                                                     资产快照
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <div className="text-[9px] text-gray-400 font-bold mb-0.5 uppercase">现金</div>
+                                                        <div className="text-[11px] text-gray-500 font-bold mb-0.5 uppercase">现金</div>
                                                         <div className="font-mono text-sm font-bold text-gray-900">{renderMoney(preview.account_snapshot.available_cash)}</div>
                                                     </div>
                                                     <div>
-                                                        <div className="text-[9px] text-gray-400 font-bold mb-0.5 uppercase">市值</div>
+                                                        <div className="text-[11px] text-gray-500 font-bold mb-0.5 uppercase">市值</div>
                                                         <div className="font-mono text-sm font-bold text-gray-900">{renderMoney(preview.account_snapshot.market_value)}</div>
                                                     </div>
                                                 </div>
                                             </div>
                                             <div className="p-4 rounded-xl border border-gray-100 bg-gray-50/50">
-                                                <div className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                                <div className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 flex items-center gap-2">
                                                     <Binary size={12} className="text-emerald-500" />
                                                     运行节点
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div className="truncate">
-                                                        <div className="text-[9px] text-gray-400 font-bold mb-0.5 uppercase">模型 ID</div>
-                                                        <div className="font-bold text-[11px] text-gray-900 truncate">{preview.strategy_context.model_id}</div>
+                                                        <div className="text-[11px] text-gray-500 font-bold mb-0.5 uppercase">模型 ID</div>
+                                                        <div className="font-bold text-[12px] text-gray-900 truncate">{preview.strategy_context.model_id}</div>
                                                     </div>
                                                     <div>
-                                                        <div className="text-[9px] text-gray-400 font-bold mb-0.5 uppercase">日期</div>
-                                                        <div className="font-mono font-bold text-[11px] text-gray-900">{preview.strategy_context.prediction_trade_date}</div>
+                                                        <div className="text-[11px] text-gray-500 font-bold mb-0.5 uppercase">日期</div>
+                                                        <div className="font-mono font-bold text-[12px] text-gray-900">{preview.strategy_context.prediction_trade_date}</div>
                                                     </div>
                                                 </div>
                                             </div>
@@ -1250,51 +1284,56 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
 
                                         <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
                                             <div className="space-y-3">
-                                                <h4 className="text-[11px] font-bold text-gray-900 px-1 flex items-center gap-2 uppercase tracking-wider">
+                                                <h4 className="text-[12px] font-bold text-gray-900 px-1 flex items-center gap-2 uppercase tracking-wider">
                                                     <div className="w-1 h-3 bg-rose-500 rounded-full" />
                                                     卖出列表 ({preview.sell_orders.length})
                                                 </h4>
                                                 <div className="space-y-2.5 max-h-[400px] overflow-y-auto pr-1 custom-scrollbar">
-                                                    {preview.sell_orders.length > 0 ? preview.sell_orders.map((order) => renderOrderCard(order, 'sell')) : (
-                                                        <div className="py-10 border border-dashed border-gray-100 rounded-xl text-center text-[10px] font-bold text-gray-300 uppercase tracking-widest">Empty</div>
+                                                    {preview.sell_orders.length > 0 ? preview.sell_orders.map((order) => renderOrderCard(order, 'sell', stockNameIndex)) : (
+                                                        <div className="py-10 border border-dashed border-gray-100 rounded-xl text-center text-[12px] font-bold text-gray-400 uppercase tracking-widest">Empty</div>
                                                     )}
                                                 </div>
                                             </div>
 
                                             <div className="space-y-3">
-                                                <h4 className="text-[11px] font-bold text-gray-900 px-1 flex items-center gap-2 uppercase tracking-wider">
+                                                <h4 className="text-[12px] font-bold text-gray-900 px-1 flex items-center gap-2 uppercase tracking-wider">
                                                     <div className="w-1 h-3 bg-emerald-500 rounded-full" />
                                                     买入列表 ({preview.buy_orders.length})
                                                 </h4>
                                                 <div className="space-y-2.5 max-h-[400px] overflow-y-auto pr-1 custom-scrollbar">
-                                                    {preview.buy_orders.length > 0 ? preview.buy_orders.map((order) => renderOrderCard(order, 'buy')) : (
-                                                        <div className="py-10 border border-dashed border-gray-100 rounded-xl text-center text-[10px] font-bold text-gray-300 uppercase tracking-widest">Empty</div>
+                                                    {preview.buy_orders.length > 0 ? preview.buy_orders.map((order) => renderOrderCard(order, 'buy', stockNameIndex)) : (
+                                                        <div className="py-10 border border-dashed border-gray-100 rounded-xl text-center text-[12px] font-bold text-gray-400 uppercase tracking-widest">Empty</div>
                                                     )}
                                                 </div>
                                             </div>
                                         </div>
 
                                         <div className="p-4 rounded-2xl bg-rose-50/30 border border-rose-100/60 shadow-sm transition-all animate-in fade-in zoom-in-95 duration-700">
-                                            <div className="flex items-center gap-2 mb-3 text-[10px] font-bold text-rose-600 uppercase tracking-widest">
+                                            <div className="flex items-center gap-2 mb-3 text-[12px] font-bold text-rose-600 uppercase tracking-widest">
                                                 <ShieldAlert size={14} />
                                                 风控/过滤项 ({preview.skipped_items.length})
                                             </div>
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[180px] overflow-y-auto pr-1 custom-scrollbar pb-1">
                                                 {preview.skipped_items.length > 0 ? preview.skipped_items.map((item, idx) => (
                                                     <div key={idx} className="p-2.5 rounded-xl bg-white border border-rose-100/40 flex items-center gap-3 shadow-sm shadow-rose-50/50">
-                                                        <div className="w-8 h-8 rounded-lg bg-rose-50 flex items-center justify-center font-mono text-[10px] font-black text-rose-400">
+                                                        <div className="w-8 h-8 rounded-lg bg-rose-50 flex items-center justify-center font-mono text-[12px] font-black text-rose-400">
                                                             {splitSuffixCode(item.symbol)[1].slice(0, 2)}
                                                         </div>
                                                         <div className="flex-1 min-w-0">
-                                                            <div className="text-[11px] font-bold text-gray-900">{normalizeSymbol(item.symbol)}</div>
-                                                            <div className="text-[9px] text-gray-500 line-clamp-1 font-medium italic">{item.reason}</div>
+                                                            <div className="text-[12px] font-bold text-gray-900 flex items-baseline gap-1.5">
+                                                                <span className="font-mono">{normalizeSymbol(item.symbol)}</span>
+                                                                {lookupStockName(stockNameIndex, item.symbol) && (
+                                                                    <span className="text-[12px] text-gray-500 truncate">{lookupStockName(stockNameIndex, item.symbol)}</span>
+                                                                )}
+                                                            </div>
+                                                            <div className="text-[11px] text-gray-500 line-clamp-1 font-medium italic">{item.reason}</div>
                                                         </div>
-                                                        <div className="text-[8px] font-black px-1.5 py-0.5 rounded-md bg-rose-100/50 text-rose-600 uppercase">
+                                                        <div className="text-[10px] font-black px-1.5 py-0.5 rounded-md bg-rose-100/50 text-rose-600 uppercase">
                                                             {item.action}
                                                         </div>
                                                     </div>
                                                 )) : (
-                                                    <div className="col-span-2 py-6 text-center text-[10px] text-gray-400 font-bold uppercase tracking-widest bg-white/50 rounded-xl border border-dashed border-gray-100">
+                                                    <div className="col-span-2 py-6 text-center text-[12px] text-gray-500 font-bold uppercase tracking-widest bg-white/50 rounded-xl border border-dashed border-gray-100">
                                                         No Risk Detected
                                                     </div>
                                                 )}
@@ -1314,24 +1353,24 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                         
                                         <div className="space-y-5 flex-1">
                                             <div className="space-y-1">
-                                                <div className="text-[9px] font-bold text-gray-400 uppercase tracking-widest ml-1">预案指纹</div>
-                                                <div className="font-mono text-[10px] text-gray-600 bg-gray-50 px-3 py-2 rounded-xl flex items-center justify-between border border-gray-100">
+                                                <div className="text-[11px] font-bold text-gray-500 uppercase tracking-widest ml-1">预案指纹</div>
+                                                <div className="font-mono text-[12px] text-gray-600 bg-gray-50 px-3 py-2 rounded-xl flex items-center justify-between border border-gray-100">
                                                     {preview ? preview.preview_hash.slice(0, 16) : 'PENDING'}...
                                                     <CheckCircle2 size={12} className={preview ? 'text-emerald-500' : 'text-gray-300'} />
                                                 </div>
                                             </div>
 
                                             <div className="p-4 rounded-xl bg-blue-50/50 border border-blue-100 space-y-3.5">
-                                                <div className="flex items-center justify-between text-[11px]">
-                                                    <span className="text-blue-600/70 uppercase">卖出总额</span>
+                                                <div className="flex items-center justify-between text-[12px]">
+                                                    <span className="text-blue-700 uppercase">卖出总额</span>
                                                     <span className="font-mono text-gray-900">{renderMoney(previewSummary?.estimated_sell_proceeds)}</span>
                                                 </div>
-                                                <div className="flex items-center justify-between text-[11px]">
-                                                    <span className="text-blue-600/70 uppercase">买入总额</span>
+                                                <div className="flex items-center justify-between text-[12px]">
+                                                    <span className="text-blue-700 uppercase">买入总额</span>
                                                     <span className="font-mono text-gray-900">{renderMoney(previewSummary?.estimated_buy_amount)}</span>
                                                 </div>
                                                 <div className="h-px bg-blue-100" />
-                                                <div className="flex items-center justify-between text-[11px]">
+                                                <div className="flex items-center justify-between text-[12px]">
                                                     <span className="text-blue-600 uppercase tracking-tighter">预估剩余</span>
                                                     <span className="font-mono text-blue-700">{renderMoney(previewSummary?.estimated_remaining_cash)}</span>
                                                 </div>
@@ -1339,11 +1378,11 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
 
                                             <div className="grid grid-cols-2 gap-2">
                                                 <div className="p-3 rounded-xl bg-gray-50 border border-gray-100 flex flex-col items-center justify-center">
-                                                    <span className="text-[9px] font-bold text-gray-400 uppercase mb-0.5">信号</span>
+                                                    <span className="text-[11px] font-bold text-gray-500 uppercase mb-0.5">信号</span>
                                                     <span className="text-xs text-gray-900">{previewSummary?.signal_count ?? 0}</span>
                                                 </div>
                                                 <div className="p-3 rounded-xl bg-gray-50 border border-gray-100 flex flex-col items-center justify-center">
-                                                    <span className="text-[9px] font-bold text-gray-400 uppercase mb-0.5">派发</span>
+                                                    <span className="text-[11px] font-bold text-gray-500 uppercase mb-0.5">派发</span>
                                                     <span className="text-xs text-emerald-600">{(previewSummary?.buy_order_count || 0) + (previewSummary?.sell_order_count || 0)}</span>
                                                 </div>
                                             </div>
@@ -1372,7 +1411,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             <button 
                                                 type="button" 
                                                 onClick={() => { setPreview(null); setCurrentStep(2); }} 
-                                                className="w-full py-2 text-[10px] font-bold text-gray-400 hover:text-gray-900 transition-colors uppercase tracking-widest text-center"
+                                                className="w-full py-2 text-[12px] font-bold text-gray-500 hover:text-gray-900 transition-colors uppercase tracking-widest text-center"
                                             >
                                                 Back to Strategy
                                             </button>
@@ -1383,7 +1422,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                         <div className="shrink-0 w-8 h-8 rounded-lg bg-amber-200/50 flex items-center justify-center text-amber-700">
                                             <Info size={16} />
                                         </div>
-                                        <div className="text-[10px] text-amber-800 leading-relaxed font-bold">
+                                        <div className="text-[12px] text-amber-800 leading-relaxed font-bold">
                                             手动任务采用「原子级幂等」设计，系统通过 Hash 校验确保不会产生重复报单。
                                         </div>
                                     </div>
@@ -1416,10 +1455,10 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                 <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/80" />
                                             </div>
                                             <div className="h-3 w-px bg-gray-200 mx-1" />
-                                            <div className="text-[10px] font-mono font-bold text-gray-400 uppercase tracking-widest">Agent Runtime</div>
+                                            <div className="text-[12px] font-mono font-bold text-gray-500 uppercase tracking-widest">Agent Runtime</div>
                                         </div>
                                         {selectedTaskId && (
-                                            <div className="px-2 py-0.5 rounded-md bg-gray-50 border border-gray-100 text-[10px] font-mono text-blue-600/70">
+                                            <div className="px-2 py-0.5 rounded-md bg-gray-50 border border-gray-100 text-[12px] font-mono text-blue-700">
                                                 ID: {selectedTaskId.slice(0, 12)}
                                             </div>
                                         )}
@@ -1428,8 +1467,8 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                     <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 font-mono text-[12px] leading-relaxed">
                                         {logs.length > 0 ? logs.map((entry) => (
                                             <div key={entry.id} className="group flex gap-4 py-1 hover:bg-gray-50/80 transition-colors border-l-2 border-transparent hover:border-blue-500/20 pl-1">
-                                                <span className="text-gray-400 select-none shrink-0 w-24 text-[10px]">[{entry.ts?.split(' ')[1] || '-'}]</span>
-                                                <span className={`shrink-0 uppercase text-[9px] font-black flex items-center h-4 mt-0.5 px-1.5 rounded-md ${
+                                                <span className="text-gray-500 select-none shrink-0 w-24 text-[12px]">[{entry.ts?.split(' ')[1] || '-'}]</span>
+                                                <span className={`shrink-0 uppercase text-[11px] font-black flex items-center h-4 mt-0.5 px-1.5 rounded-md ${
                                                     entry.level === 'error' ? 'bg-rose-50 text-rose-500' : 
                                                     entry.level === 'warning' ? 'bg-amber-50 text-amber-600' : 
                                                     'bg-emerald-50 text-emerald-600'
@@ -1442,8 +1481,8 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             </div>
                                         )) : (
                                             <div className="h-full flex flex-col items-center justify-center text-center space-y-3 opacity-20">
-                                                <Cpu size={20} className="text-slate-400 animate-pulse" />
-                                                <p className="text-[10px] uppercase font-bold text-slate-500">Connecting...</p>
+                                                <Cpu size={20} className="text-slate-500 animate-pulse" />
+                                                <p className="text-[12px] uppercase font-bold text-slate-500">Connecting...</p>
                                             </div>
                                         )}
                                         <div ref={viewportRef} />
@@ -1453,17 +1492,17 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                         <div className="mt-5 p-4 rounded-2xl bg-gray-50/50 border border-gray-100 flex items-center justify-between">
                                             <div className="flex items-center gap-6">
                                                 <div className="flex flex-col">
-                                                    <span className="text-[9px] font-bold text-gray-400 uppercase tracking-tight">Stage</span>
+                                                    <span className="text-[11px] font-bold text-gray-500 uppercase tracking-tight">Stage</span>
                                                     <span className="text-xs font-bold text-gray-900">{stageLabel(snapshot.stage || snapshot.status)}</span>
                                                 </div>
                                                 <div className="w-px h-6 bg-gray-200" />
                                                 <div className="flex items-center gap-5">
                                                     <div className="flex flex-col">
-                                                        <span className="text-[9px] font-bold text-gray-400 uppercase tracking-tight">Success</span>
+                                                        <span className="text-[11px] font-bold text-gray-500 uppercase tracking-tight">Success</span>
                                                         <span className="text-sm font-bold text-emerald-600">{snapshot.success_count ?? 0}</span>
                                                     </div>
                                                     <div className="flex flex-col">
-                                                        <span className="text-[9px] font-bold text-gray-400 uppercase tracking-tight">Failed</span>
+                                                        <span className="text-[11px] font-bold text-gray-500 uppercase tracking-tight">Failed</span>
                                                         <span className="text-sm font-bold text-rose-600">{snapshot.failed_count ?? 0}</span>
                                                     </div>
                                                 </div>
@@ -1471,7 +1510,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             {snapshot.stage !== 'completed' && snapshot.status !== 'completed' && (
                                                 <div className="flex items-center gap-2 px-2 py-1 rounded-full bg-emerald-50 border border-emerald-100">
                                                     <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                                    <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">Agent Live</span>
+                                                    <span className="text-[12px] font-bold text-emerald-600 uppercase tracking-wider">Agent Live</span>
                                                 </div>
                                             )}
                                         </div>
@@ -1488,21 +1527,21 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                             </div>
                                             <div>
                                                 <div className="text-sm font-bold text-gray-900">执行确认</div>
-                                                <div className="text-[9px] text-gray-400 font-bold uppercase tracking-wider">Final Authorization</div>
+                                                <div className="text-[11px] text-gray-500 font-bold uppercase tracking-wider">Final Authorization</div>
                                             </div>
                                         </div>
 
                                         <div className="p-4 rounded-xl bg-gray-50/50 border border-gray-100 space-y-3 shadow-inner">
-                                            <div className="flex items-center justify-between text-[11px]">
-                                                <span className="text-gray-400">委托笔数</span>
+                                            <div className="flex items-center justify-between text-[12px]">
+                                                <span className="text-gray-500">委托笔数</span>
                                                 <span className="text-gray-900">{(previewSummary?.buy_order_count || 0) + (previewSummary?.sell_order_count || 0)} 笔</span>
                                             </div>
-                                            <div className="flex items-center justify-between text-[11px]">
-                                                <span className="text-gray-400">预估买入</span>
+                                            <div className="flex items-center justify-between text-[12px]">
+                                                <span className="text-gray-500">预估买入</span>
                                                 <span className="text-gray-900">{renderMoney(previewSummary?.estimated_buy_amount)}</span>
                                             </div>
-                                            <div className="flex items-center justify-between text-[11px]">
-                                                <span className="text-gray-400">风险拦截</span>
+                                            <div className="flex items-center justify-between text-[12px]">
+                                                <span className="text-gray-500">风险拦截</span>
                                                 <span className="text-rose-500">{previewSummary?.skipped_count ?? 0}</span>
                                             </div>
                                         </div>
@@ -1526,7 +1565,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                 type="button" 
                                                 disabled={submitting}
                                                 onClick={() => setCurrentStep(3)} 
-                                                className="w-full py-2 text-[10px] font-bold text-gray-400 hover:text-gray-900 transition-colors uppercase tracking-widest text-center"
+                                                className="w-full py-2 text-[12px] font-bold text-gray-500 hover:text-gray-900 transition-colors uppercase tracking-widest text-center"
                                             >
                                                 Review Preview
                                             </button>
@@ -1538,12 +1577,12 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                                     <CheckCircle2 size={24} />
                                                 </div>
                                                 <div className="text-xs font-bold text-emerald-900 leading-none">正在执行</div>
-                                                <div className="text-[9px] text-emerald-600/70 mt-1 uppercase tracking-tighter">Executing</div>
+                                                <div className="text-[11px] text-emerald-700 mt-1 uppercase tracking-tighter">Executing</div>
                                             </div>
                                             {(selectedTask?.stage === 'completed' || selectedTask?.status === 'completed') && (
                                                 <button
                                                     onClick={() => message.success('请在左边栏查看订单明细')}
-                                                    className="w-full py-3 rounded-xl border border-gray-200 bg-white text-gray-900 text-[11px] font-bold hover:bg-gray-50 transition-all shadow-sm"
+                                                    className="w-full py-3 rounded-xl border border-gray-200 bg-white text-gray-900 text-[12px] font-bold hover:bg-gray-50 transition-all shadow-sm"
                                                 >
                                                     查看成交结果
                                                 </button>
@@ -1552,8 +1591,8 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) 
                                     )}
 
                                     <div className="p-4 rounded-xl border border-gray-50 bg-gray-50/20">
-                                        <div className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1.5 opacity-60">风险披露</div>
-                                        <div className="text-[9px] text-gray-400 leading-relaxed italic">
+                                        <div className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-1.5 opacity-60">风险披露</div>
+                                        <div className="text-[11px] text-gray-500 leading-relaxed italic">
                                             指令通过执行引擎报送。请确保账户已就绪且资金充足。
                                         </div>
                                     </div>
