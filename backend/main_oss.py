@@ -422,7 +422,7 @@ def _ensure_database_schema():
 
 
 def _upgrade_script_paths() -> list[str]:
-    """未来增量补丁 SQL 的候选路径（去重保序）。
+    """未来增量补丁 SQL 的候选路径（按文件名去重、按版本号排序）。
 
     历史补丁 v1.0.1 ~ v1.0.8 已合并进 backend/shared/db_init.sql 第 66 节
     （存量库收敛），data/upgrade_v1.0.*.sql 不再维护。这里保留扫描能力，
@@ -432,6 +432,7 @@ def _upgrade_script_paths() -> list[str]:
     再扫仓库相对路径，避免本地直接跑 main_oss 时漏脚本。
     """
     import glob as _glob
+    import re
 
     here = os.path.dirname(os.path.abspath(__file__))
     repo_data = os.path.abspath(os.path.join(here, "..", "data"))
@@ -443,10 +444,17 @@ def _upgrade_script_paths() -> list[str]:
         os.path.join(repo_data, "upgrade_*.sql"),
     ):
         for sql_path in sorted(_glob.glob(pattern)):
-            if sql_path not in seen:
-                seen.add(sql_path)
+            name = os.path.basename(sql_path)
+            if name not in seen:
+                seen.add(name)
                 out.append(sql_path)
-    return out
+    return sorted(
+        out,
+        key=lambda path: tuple(
+            (0, int(part)) if part.isdigit() else (1, part)
+            for part in re.split(r"(\d+)", os.path.basename(path))
+        ),
+    )
 
 
 def _ensure_upgrade_scripts(env: dict) -> None:
@@ -465,7 +473,7 @@ def _ensure_upgrade_scripts(env: dict) -> None:
                  "-p", os.getenv("DB_PORT", "5432"),
                  "-U", os.getenv("DB_USER", os.getenv("POSTGRES_USER", "quantmind")),
                  "-d", os.getenv("DB_NAME", os.getenv("POSTGRES_DB", "quantmind")),
-                 "-f", sql_path, "--quiet", "-v", "ON_ERROR_STOP=0"],
+                 "-f", sql_path, "--quiet", "-v", "ON_ERROR_STOP=1"],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -488,6 +496,7 @@ def _ensure_upgrade_scripts_python(sql_path: str) -> None:
     db_name = os.getenv("DB_NAME", os.getenv("POSTGRES_DB", "quantmind"))
     db_user = os.getenv("DB_USER", os.getenv("POSTGRES_USER", "quantmind"))
     db_password = os.getenv("DB_PASSWORD", os.getenv("POSTGRES_PASSWORD", "quantmind2026"))
+    conn = None
     try:
         import psycopg2  # type: ignore
         sql_text = open(sql_path, encoding="utf-8").read()
@@ -495,10 +504,15 @@ def _ensure_upgrade_scripts_python(sql_path: str) -> None:
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(sql_text)
-        conn.close()
         logger.info("增量升级已执行(Python): %s", os.path.basename(sql_path))
     except Exception as e:  # noqa: BLE001
+        if conn is not None:
+            with conn.cursor() as rollback_cur:
+                rollback_cur.execute("ROLLBACK")
         logger.warning("增量升级失败(Python) %s: %s", os.path.basename(sql_path), e)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _ensure_market_analysis_tables(env: dict) -> None:
@@ -546,6 +560,7 @@ def _ensure_database_schema_python():
     db_user = os.getenv("DB_USER", os.getenv("POSTGRES_USER", "quantmind"))
     db_password = os.getenv("DB_PASSWORD", os.getenv("POSTGRES_PASSWORD", "quantmind2026"))
 
+    conn = None
     try:
         import psycopg2
         conn = psycopg2.connect(host=db_host, port=db_port, dbname=db_name,
@@ -568,11 +583,19 @@ def _ensure_database_schema_python():
                         cur.execute(f.read())
                     logger.info("增量升级已执行(Python): %s", os.path.basename(_up))
                 except Exception as ue:  # noqa: BLE001
+                    # 文件可含 BEGIN/COMMIT。autocommit=True 下 conn.rollback()
+                    # 可能是空操作；用显式 SQL 结束失败事务，隔离后续升级。
+                    cur.execute("ROLLBACK")
                     logger.warning("增量升级失败(Python) %s: %s", os.path.basename(_up), ue)
-        conn.close()
         logger.info("数据库表结构自检完成 (Python psycopg2)")
     except Exception as e:
+        if conn is not None:
+            with conn.cursor() as rollback_cur:
+                rollback_cur.execute("ROLLBACK")
         logger.warning("数据库自动建表失败（不影响启动）: %s", e)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _ensure_seed_admin():
