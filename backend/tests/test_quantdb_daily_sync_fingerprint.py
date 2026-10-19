@@ -196,3 +196,27 @@ def test_manifest_only_size_drift_triggers_download(tmp_path, monkeypatch):
 
     assert (done, errors) == (1, 0)
     assert target.read_bytes() == b"new!"
+
+
+def test_stale_release_sha_overridden_by_manifest_size(tmp_path, monkeypatch):
+    """上游覆盖对象但未发 release：release sha 指向旧文件，以 manifest 尺寸为准。"""
+    monkeypatch.setattr(sync, "QUANTDB_DATA_DIR", tmp_path)
+    key = "6_ml_datasets/l1_factors/dt=20250102/data.parquet"
+    target = _seed_local(tmp_path, key, b"old")
+    state = _state(tmp_path)
+    _insert_state(state, key, b"old", target, dataset="l1_factors")
+
+    release_obj = _release_obj(key, b"old")  # release 仍指向本地旧内容
+    client = FakeClient(
+        objects={key: release_obj},
+        contents={key: b"new!"},
+        manifest=[{"key": key, "size": 4, "etag": '"m"'}],
+    )
+    done, errors = sync._sync_v2_dataset(client, state, "6", "l1_factors")
+
+    assert (done, errors) == (1, 0)
+    assert target.read_bytes() == b"new!"
+    row = state.execute(
+        "SELECT sha256, size FROM objects WHERE key=?", (key,)
+    ).fetchone()
+    assert row == (hashlib.sha256(b"new!").hexdigest(), 4)

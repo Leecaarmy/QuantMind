@@ -224,6 +224,13 @@ def _since_skip(key: str, since: date | None) -> bool:
     return d < since
 
 
+def _as_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _download_object(
     client,
     dataset: str,
@@ -299,6 +306,9 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
             latest[key] = obj
 
     # ---- Phase 2: manifest 补漏 ----
+    # manifest 同时是对象目录：其 size 反映服务端当前对象，可能比 release 新
+    # （上游先覆盖对象、后发 release）。这里完整保留一份用于尺寸对账。
+    manifest_by_key: dict[str, dict] = {}
     try:
         manifest = client.query_manifest(category_id=cat_id, sub_category=dataset)
         if manifest:
@@ -306,6 +316,7 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
                 key = obj.get("key", "")
                 if not key or _is_patch_key(key):
                     continue
+                manifest_by_key[key] = obj
                 if key not in latest:
                     latest[key] = obj
             if manifest and len(latest) > (sum(len(r.get("objects", [])) for r in releases) if releases else 0):
@@ -329,14 +340,32 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
             log.info("[V2] %s: --since=%s 过滤，保留 %d/%d 个分区对象",
                      dataset, since, len(latest), raw_count)
     refreshed = 0
+    size_refreshed = 0
     for key, obj in latest.items():
         rel_path = obj.get("relative_path") or key
         target = QUANTDB_DATA_DIR / rel_path
+        mobj = manifest_by_key.get(key) or {}
         expected_sha = str(obj.get("sha256") or "").strip().lower()
-        try:
-            expected_size = int(obj["size"]) if obj.get("size") is not None else None
-        except (TypeError, ValueError):
-            expected_size = None
+        release_size = _as_int(obj.get("size"))
+        manifest_size = _as_int(mobj.get("size"))
+        if (
+            manifest_size is not None
+            and release_size is not None
+            and manifest_size != release_size
+        ):
+            # manifest 比 release 新：release 的 sha256 指向旧对象，不能用来
+            # 校验；以 manifest 的当前尺寸为准（l1_factors / daily_backward
+            # 都出现过「release 指纹==本地旧文件，但对象已被覆盖」）。
+            obj = {
+                **obj,
+                "sha256": "",
+                "size": manifest_size,
+                "etag": mobj.get("etag") or obj.get("etag", ""),
+            }
+            expected_sha = ""
+            expected_size = manifest_size
+        else:
+            expected_size = release_size if release_size is not None else manifest_size
         row = state.execute(
             "SELECT path, sha256, size FROM objects WHERE key=?", (key,)
         ).fetchone()
@@ -356,6 +385,13 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
                 continue
             else:
                 # 无服务端指纹：全量重写数据集或尺寸不符，用本地哈希兜底。
+                if (
+                    not size_matches
+                    and manifest_size is not None
+                    and release_size is not None
+                    and manifest_size != release_size
+                ):
+                    size_refreshed += 1
                 verify.append((key, obj, target))
             continue
         # 状态库无登记但文件已在磁盘：与云端 sha256 对上就登记跳过，
@@ -369,8 +405,13 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
         else:
             pending.append((key, obj, target))
 
-    if refreshed:
-        log.info("[V2] %s: %d 个分区云端指纹已变化，安排重下", dataset, refreshed)
+    if refreshed or size_refreshed:
+        log.info(
+            "[V2] %s: %d 个分区 release 指纹变化、%d 个分区 manifest 尺寸变化，安排核对/重下",
+            dataset,
+            refreshed,
+            size_refreshed,
+        )
 
     if verify:
         verified_count = 0
@@ -378,10 +419,7 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
         def verify_work(item):
             key, obj, target = item
             expected = str(obj.get("sha256") or "").strip().lower()
-            try:
-                expected_size = int(obj["size"]) if obj.get("size") is not None else None
-            except (TypeError, ValueError):
-                expected_size = None
+            expected_size = _as_int(obj.get("size"))
             if not target.exists():
                 return key, obj, target, None
             if expected_size is not None and target.stat().st_size != expected_size:
@@ -416,10 +454,7 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
 
     def work(item):
         key, obj, target = item
-        try:
-            expected_size = int(obj["size"]) if obj.get("size") is not None else None
-        except (TypeError, ValueError):
-            expected_size = None
+        expected_size = _as_int(obj.get("size"))
         sha, _md5, size = _download_object(
             client,
             dataset,
