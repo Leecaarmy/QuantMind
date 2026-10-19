@@ -24,9 +24,18 @@
 --
 -- 注意：本文件由脚本从上述 JSON 生成，请勿手工编辑；数据变更请改 JSON 后
 --   重新生成，并同步覆盖 data/upgrade_v1.0.10.sql。
+--   「0. 结构收敛」段为存量库补列，不属于 JSON 生成内容，重新生成后需保留。
 -- ============================================================
 
 BEGIN;
+
+-- ---- 0. 结构收敛：存量库补 explanation 列（幂等）----
+--   背景：explanation 列当初只加在 db_init.sql 的 CREATE TABLE IF NOT EXISTS
+--   里，而 CREATE TABLE IF NOT EXISTS 不改动已存在的表，所以按旧版本建过
+--   qm_feature_definition 的存量库缺该列；下面的 INSERT 显式引用 explanation，
+--   会直接报 column "explanation" ... does not exist。手工执行本文件前先补列。
+ALTER TABLE qm_feature_definition
+    ADD COLUMN IF NOT EXISTS explanation TEXT DEFAULT '';
 
 -- ---- 1. 分类（15 个）----
 INSERT INTO qm_feature_category (category_id, category_name, sort_order, description) VALUES

@@ -20,9 +20,20 @@
 --
 -- 注意：本文件由 backend/shared/patches/qm_feature_registry_seed.sql 复制而来，
 --   请勿手工编辑；数据变更请改 JSON 后重新生成种子再同步本文件。
+--   「0. 结构收敛」段为存量库补列，不参与 JSON 生成，重新生成后需保留。
 -- ============================================================
 
 BEGIN;
+
+-- ---- 0. 结构收敛：存量库补 explanation 列（幂等）----
+--   背景：explanation 列只在 db_init.sql 的 CREATE TABLE IF NOT EXISTS 里新增过，
+--   而 CREATE TABLE IF NOT EXISTS 不会改动已存在的表，所以「按旧版本建过
+--   qm_feature_definition」的存量库缺该列。update.sh 用 ON_ERROR_STOP=1 跑本文件，
+--   下面的 INSERT 直接引用 explanation → 首次升级即报
+--   column "explanation" of relation "qm_feature_definition" does not exist。
+--   这里先补齐再用列，老库/新库都可重放。
+ALTER TABLE qm_feature_definition
+    ADD COLUMN IF NOT EXISTS explanation TEXT DEFAULT '';
 
 -- ---- 1. 分类（15 个）----
 INSERT INTO qm_feature_category (category_id, category_name, sort_order, description) VALUES
