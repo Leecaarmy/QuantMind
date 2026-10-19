@@ -486,6 +486,10 @@ def _sync_v2_dataset(client, state, cat_id: str, dataset: str, progress_cb: Call
                 log.info("[V2] %s: %d/%d", dataset, done, len(pending))
                 if progress_cb:
                     progress_cb("file", dataset=dataset, done=done, total=len(pending))
+            # 大批量补列（数千分区）时定期落状态：任务被超时/重启打断后，
+            # 已下载文件不会因状态回滚而整套重下。
+            if done % 100 == 0:
+                state.commit()
             # 协作式取消：当前文件已落盘登记，再停止后续新任务。
             if should_cancel and should_cancel():
                 pool.shutdown(wait=False, cancel_futures=True)
