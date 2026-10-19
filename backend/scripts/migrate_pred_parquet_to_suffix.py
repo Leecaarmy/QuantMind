@@ -7,7 +7,7 @@
   造成同一日双行。
 
 动作：扫描模型根目录下全部 pred.parquet 与 pred_daily/dt=*/data.parquet，
-  symbol 列严格前缀值 → 后缀，同文件内去重（keep last，新行在后）。
+  symbol 列统一后缀，同文件内去重（后缀行优先，同格式末行优先）。
   pred.pkl（qlib-bound 小写索引）不在范围。
 
 模型根目录：MODELS_PRODUCTION（默认 /app/models/production）+
@@ -22,21 +22,17 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import sys
+import tempfile
 from pathlib import Path
 
-PREFIX_RE = re.compile(r"^(SH|SZ|BJ)(\d{6})$")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-
-def to_suffix(value: object) -> str:
-    s = str(value or "").strip().upper()
-    m = PREFIX_RE.match(s)
-    return f"{m.group(2)}.{m.group(1)}" if m else s
+from backend.shared.prediction_normalization import normalize_prediction_frame
 
 
 def convert_file(path: Path, *, date_col: str | None, dry_run: bool) -> tuple[int, int]:
-    """返回 (转换行数, 总行数)。非预期的文件结构跳过并报错。"""
+    """返回 (影响行数, 原始总行数)。dry-run 同样检查归一化后的重复。"""
     import pandas as pd
 
     df = pd.read_parquet(path)
@@ -44,19 +40,26 @@ def convert_file(path: Path, *, date_col: str | None, dry_run: bool) -> tuple[in
         print(f"  跳过 {path}：无 symbol 列")
         return 0, 0
     total = len(df)
-    mask = df["symbol"].astype(str).str.match(r"^(SH|SZ|BJ)\d{6}$")
-    n = int(mask.sum())
+    if date_col and date_col not in df.columns:
+        raise ValueError(f"{path} 缺少日期列 {date_col}，拒绝按股票全历史去重")
+    normalized = normalize_prediction_frame(df, date_column=date_col)
+    original = df["symbol"].astype(str)
+    from backend.shared.stock_utils import StockCodeUtil
+
+    n = int((original != original.map(StockCodeUtil.normalize)).sum())
+    removed = total - len(normalized)
+    n = max(n, removed)
     if n == 0:
         return 0, total
     if not dry_run:
-        df.loc[mask, "symbol"] = df.loc[mask, "symbol"].map(to_suffix)
-        if date_col and date_col in df.columns:
-            df = df.drop_duplicates(subset=["symbol", date_col], keep="last")
-        else:
-            df = df.drop_duplicates(subset=["symbol"], keep="last")
-        tmp = path.with_suffix(".parquet.tmp")
-        df.to_parquet(tmp, index=False)
-        os.replace(tmp, path)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".parquet.tmp")
+        os.close(fd)
+        try:
+            normalized.to_parquet(tmp, index=False)
+            os.replace(tmp, path)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+    print(f"  {'[dry-run] ' if dry_run else ''}{path}: 去重 {removed} 行")
     return n, total
 
 
@@ -86,6 +89,7 @@ def main() -> int:
     print(f"扫描到 {len(files)} 个 parquet 文件")
     converted_files = 0
     converted_rows = 0
+    failures = 0
     for path in files:
         try:
             date_col = "trade_date" if path.name == "pred.parquet" else None
@@ -93,11 +97,12 @@ def main() -> int:
             if n:
                 converted_files += 1
                 converted_rows += n
-                print(f"  {'[dry-run] ' if args.dry_run else ''}{path}: {n}/{total} 行转后缀")
+                print(f"  {'[dry-run] ' if args.dry_run else ''}{path}: 影响 {n}/{total} 行")
         except Exception as exc:
+            failures += 1
             print(f"  失败 {path}: {exc}", file=sys.stderr)
     print(f"{'dry-run ' if args.dry_run else ''}完成：{converted_files} 文件，{converted_rows} 行")
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

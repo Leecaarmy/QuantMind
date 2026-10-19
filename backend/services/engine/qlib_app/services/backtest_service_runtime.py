@@ -1289,78 +1289,26 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         """
         if pred.empty or "instrument" not in pred.index.names:
             return pred
-        inst_values = pred.index.get_level_values("instrument")
-        pred_codes = set(map(str, inst_values))
-        # 快速检查：若已有一定重叠（按 qlib 小写前缀归一化后），无需转换
-        raw_prefix = {self._to_qlib_prefix_code(c) for c in pred_codes}
+        from backend.shared.prediction_normalization import align_prediction_index
+
         try:
-            qlib_instruments = D.list_instruments(
-                D.instruments(_qlib_universe(str(request.universe) or "all")), as_list=True
+            instruments = D.list_instruments(
+                D.instruments(_qlib_universe(str(request.universe) or "all")),
+                as_list=True,
             )
         except Exception:
-            qlib_instruments = []
-        qlib_codes = set(qlib_instruments)
-        if not qlib_codes:
-            return pred
-        overlap = len(raw_prefix & qlib_codes)
-        if overlap == 0:
-            task_logger.warning(
-                "align_pred_instruments_no_overlap",
-                "pred 与 qlib instrument 无重叠，信号将为空",
-                pred_sample=list(pred_codes)[:3],
-                qlib_sample=list(qlib_codes)[:3],
-            )
-            return pred.iloc[0:0]
-        # 归一化为 qlib 小写前缀，剔除无法匹配的
-        new_inst = pd.Series(
-            inst_values.map(self._to_qlib_prefix_code).values,
-            index=pred.index,
-        )
-        valid = new_inst.isin(qlib_codes)
+            instruments = []
+        result = align_prediction_index(pred, instruments)
+        if instruments:
+            valid = result.index.get_level_values("instrument").isin(instruments)
+            result = result.loc[valid]
         task_logger.info(
             "align_pred_instruments",
-            "对齐 pred instrument 到 qlib 格式",
-            before=len(inst_values),
-            kept=int(valid.sum()),
-            dropped=int((~valid).sum()),
+            "归一化并去重 pred instrument 到 qlib 格式",
+            before=len(pred),
+            kept=len(result),
         )
-        result = pred.loc[valid].copy()
-        # 用映射后的 instrument 重建 MultiIndex（保持与 datetime 的行级对齐）
-        result.index = pd.MultiIndex.from_arrays(
-            [
-                result.index.get_level_values("datetime"),
-                new_inst[valid].values,
-            ],
-            names=["datetime", "instrument"],
-        )
-        # pred 可能同时含两种代码格式（如 BJ920000 与 920000.BJ）映射到同一
-        # qlib 代码，产生重复 (datetime, instrument)。去重（保留优先级最高的格式：
-        # 原生小写前缀 > 大写前缀 > 后缀），否则向量化引擎 unstack 会因重复索引报错。
-        if result.index.duplicated().any():
-            task_logger.warning(
-                "align_pred_instruments_duplicates",
-                "pred 信号存在重复 (datetime, instrument)，已按格式优先级去重",
-                duplicated=int(result.index.duplicated().sum()),
-            )
-            # 格式优先级：小写前缀=0（qlib 原生）> 大写前缀=1 > 后缀=2
-            inst_str = result.index.get_level_values("instrument").astype(str)
-
-            def _fmt_priority(code: str) -> int:
-                c = code.lower()
-                if len(c) == 8 and c[:2] in {"sh", "sz", "bj"}:
-                    return 0
-                if len(c) == 8 and c[:2] in {"SH", "SZ", "BJ"}:
-                    return 1
-                if "." in c:
-                    return 2
-                return 3
-
-            prio = inst_str.map(_fmt_priority)
-            result = result.assign(_prio=prio.values).sort_index()
-            result = result[
-                ~result.index.duplicated(keep="first")
-            ].drop(columns="_prio")
-        return result.sort_index()
+        return result
 
     def _materialize_signal_dataframe(
         self, signal_data: Any, request: QlibBacktestRequest

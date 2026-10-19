@@ -38,6 +38,7 @@ def merge_signals_into_pred(
     import pandas as pd
 
     from backend.shared.stock_utils import StockCodeUtil
+    from backend.shared.prediction_normalization import normalize_prediction_frame
 
     if not parquet_file.is_file() and not create_if_missing:
         return 0
@@ -64,13 +65,14 @@ def merge_signals_into_pred(
             )
     if not rows:
         return 0
-    new_df = pd.DataFrame(rows)
+    new_df = normalize_prediction_frame(pd.DataFrame(rows))
     con = duckdb.connect()
     try:
         if parquet_file.is_file():
             existing = con.execute(
                 f"SELECT * FROM read_parquet('{str(parquet_file)}')"
             ).df()
+            existing = normalize_prediction_frame(existing)
             combined = pd.concat([existing, new_df], ignore_index=True)
         else:
             combined = new_df
@@ -89,7 +91,8 @@ def merge_signals_into_pred(
             pass
 
     # 刷新按日物化分片：合并后的当日截面直接落盘，投研平台无需再从全量重提。
-    _refresh_pred_daily(parquet_file, new_df)
+    dates = new_df["trade_date"].unique()
+    _refresh_pred_daily(parquet_file, combined.loc[combined["trade_date"].isin(dates)])
     return len(new_df)
 
 

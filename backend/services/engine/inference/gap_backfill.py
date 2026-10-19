@@ -261,36 +261,8 @@ def compute_coverage(
 
 
 def _template_copy_day(parquet_file: Path, d: str) -> tuple[bool, str]:
-    """runner 失败时回退：复制 pred 最后一日截面改日期。"""
-    import duckdb
-    import pandas as pd
-
-    con = duckdb.connect()
-    try:
-        last_date = read_pred_dates(parquet_file)[-1] if parquet_file.is_file() else None
-        if not last_date:
-            return False, f"{d} 失败：无模板日且 runner 未成功"
-        df = con.execute(
-            f"SELECT * FROM read_parquet('{str(parquet_file)}') "
-            f"WHERE CAST(trade_date AS VARCHAR) = '{last_date}'"
-        ).df()
-        if df.empty:
-            return False, f"{d} 跳过：模板日无数据"
-        df["trade_date"] = pd.Timestamp(d)
-        existing = con.execute(
-            f"SELECT * FROM read_parquet('{str(parquet_file)}')"
-        ).df()
-        combined = pd.concat([existing, df], ignore_index=True)
-        combined = combined.drop_duplicates(
-            subset=["symbol", "trade_date"], keep="last"
-        )
-        combined.to_parquet(str(parquet_file), index=False)
-        return True, f"{d} 推理完成（模板复制 {len(df)} 行）"
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
+    """Compatibility guard: copied scores must never stand in for inference."""
+    return False, f"{d} 推理失败：已禁止模板复制，保留缺口等待真实推理"
 
 
 async def _mark_failed_run(
@@ -414,7 +386,7 @@ async def backfill_model_gaps(
     metadata: dict[str, Any] | None = None,
     source: str = "backfill",
     progress_cb: ProgressCb | None = None,
-    allow_template_copy: bool = True,
+    allow_template_copy: bool = False,
 ) -> dict[str, Any]:
     """对单个模型执行一键补全。gaps 为空时自动算缺口。"""
     storage_path = str(storage_path or "").strip()

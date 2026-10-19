@@ -304,94 +304,26 @@ class SimpleSignal(Signal):
             return None
 
     def _align_instrument_case(self, series: pd.Series) -> pd.Series:
-        """
-        对齐 pred 信号股票代码大小写，避免与 qlib 数据集代码风格不一致导致 0 成交。
-        支持的转换：
-        - 纯数字 → SH/SZ/BJ 前缀格式 (e.g. 600036 → SH600036)
-        - 后缀格式 → 前缀格式 (e.g. 600036.SH → SH600036)
-        - 大小写对齐
-        """
+        """Normalize every alias and enforce unique daily Qlib signal keys."""
+        from backend.shared.prediction_normalization import align_prediction_index
+
         try:
-            if not isinstance(series.index, pd.MultiIndex):
-                return series
-            if "instrument" not in series.index.names:
-                return series
-
-            inst_values = series.index.get_level_values("instrument")
-            if len(inst_values) == 0:
-                return series
-
-            # 基于当前 universe 的可交易代码判断目标大小写风格
-            qlib_instruments = self._get_universe_instruments()
-            if not qlib_instruments:
-                task_logger.warning("universe_empty_skip_case_align", "Universe 返回空股票列表，跳过大小写对齐", universe=self.universe)
-                return series
-            qlib_set = set(map(str, qlib_instruments))
-            pred_set = set(map(str, inst_values))
-
-            # 快速检查：如果重叠已经很高，直接返回
-            raw_overlap = len(pred_set & qlib_set)
-            if raw_overlap >= len(pred_set) * 0.5:
-                return series
-
-            def to_qlib_code(code: str) -> str:
-                code_str = str(code or "").strip().upper()
-                # 已经是 SH/SZ/BJ 前缀格式
-                if len(code_str) == 8 and code_str[:2] in {"SH", "SZ", "BJ"}:
-                    return code_str
-                # 后缀格式: 600036.SH → SH600036
-                if "." in code_str:
-                    parts = code_str.split(".")
-                    if len(parts) == 2 and len(parts[0]) == 6 and parts[0].isdigit():
-                        return parts[1] + parts[0]
-                # 纯6位数字: 600036 → SH600036
-                if code_str.isdigit() and len(code_str) == 6:
-                    if code_str.startswith(("6", "9")):
-                        return "SH" + code_str
-                    if code_str.startswith(("0", "2", "3")):
-                        return "SZ" + code_str
-                    if code_str.startswith(("4", "8")):
-                        return "BJ" + code_str
-                return code_str
-
-            # 尝试各种转换策略，选重叠率最高的
-            candidates = [
-                ("raw", lambda s: str(s)),
-                ("lower", lambda s: str(s).lower()),
-                ("upper", lambda s: str(s).upper()),
-                ("qlib_upper", to_qlib_code),
-                ("qlib_lower", lambda s: to_qlib_code(s).lower()),
-            ]
-
-            best_name = "raw"
-            best_overlap = raw_overlap
-            for name, fn in candidates:
-                mapped_set = {fn(v) for v in pred_set}
-                overlap = len(mapped_set & qlib_set)
-                if overlap > best_overlap:
-                    best_name = name
-                    best_overlap = overlap
-
-            if best_overlap <= raw_overlap:
-                return series
-
-            transform = dict(candidates)[best_name]
-            new_inst = inst_values.map(transform)
-            series.index = pd.MultiIndex.from_arrays(
-                [series.index.get_level_values("datetime"), new_inst],
-                names=["datetime", "instrument"],
-            )
-            task_logger.info(
-                "align_instrument_case",
-                "SimpleSignal 已自动对齐 pred 股票代码格式",
-                best_name=best_name,
-                raw_overlap=raw_overlap,
-                best_overlap=best_overlap,
-            )
-            return series.sort_index()
+            instruments = self._get_universe_instruments()
         except Exception as exc:
-            task_logger.warning("align_instrument_case_failed", "股票代码大小写对齐失败，保持原始 pred 索引", error=str(exc))
-            return series
+            task_logger.warning(
+                "load_alignment_universe_failed",
+                "股票池读取失败，仍按标准格式归一化预测信号",
+                error=str(exc),
+            )
+            instruments = []
+        result = align_prediction_index(series, instruments)
+        if len(result) < len(series):
+            task_logger.warning(
+                "deduplicate_pred_signal",
+                "预测信号归一化后存在重复，优先保留后缀格式及同格式末行",
+                removed=len(series) - len(result),
+            )
+        return result
 
     def get_signal(self, start_time, end_time):
         if self._pred_path:

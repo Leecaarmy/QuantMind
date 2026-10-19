@@ -19,6 +19,23 @@ def test_simple_signal_loads_first_column_from_qlib_instrument_file(tmp_path: Pa
     assert signal._load_instruments_from_file(instrument_file) == ["sh600000", "sz000001"]
 
 
+def test_simple_signal_mixed_aliases_return_unique_reindexable_scores(tmp_path, monkeypatch):
+    path = tmp_path / "pred.parquet"
+    pd.DataFrame(
+        {
+            "trade_date": ["2026-09-30"] * 3,
+            "symbol": ["SH600000", "600000.SH", "000001.SZ"],
+            "pred": [0.1, 0.9, 0.2],
+        }
+    ).to_parquet(path, index=False)
+    signal = SimpleSignal(pred_path=str(path))
+    monkeypatch.setattr(signal, "_get_universe_instruments", lambda: ["sh600000", "sz000001"])
+    for _ in range(2):  # Includes cached retrieval.
+        daily = signal.get_signal(pd.Timestamp("2026-09-30"), pd.Timestamp("2026-09-30"))
+        assert daily.index.is_unique
+        assert daily.reindex(["sh600000", "sz000001"]).tolist() == [0.9, 0.2]
+
+
 def test_simple_signal_lags_pred_series_to_next_available_date(tmp_path: Path):
     pred_path = tmp_path / "pred.pkl"
     idx = pd.MultiIndex.from_tuples(
@@ -40,7 +57,7 @@ def test_simple_signal_lags_pred_series_to_next_available_date(tmp_path: Path):
     series = signal._load_pred_series(pd.Timestamp("2025-01-03"), pd.Timestamp("2025-01-03"))
 
     assert series is not None
-    assert series.loc[(pd.Timestamp("2025-01-03"), "SH600000")] == 0.1
+    assert series.loc[(pd.Timestamp("2025-01-03"), "sh600000")] == 0.1
 
 
 def test_simple_signal_does_not_double_apply_qlib_step_shift(tmp_path: Path):
@@ -64,7 +81,7 @@ def test_simple_signal_does_not_double_apply_qlib_step_shift(tmp_path: Path):
     series = signal._load_pred_series(pd.Timestamp("2025-01-03"), pd.Timestamp("2025-01-03"))
 
     assert series is not None
-    assert series.loc[(pd.Timestamp("2025-01-03"), "SH600000")] == 0.2
+    assert series.loc[(pd.Timestamp("2025-01-03"), "sh600000")] == 0.2
 
 
 def test_simple_signal_applies_residual_lag_when_signal_lag_days_gt_one(tmp_path: Path):
@@ -84,7 +101,7 @@ def test_simple_signal_applies_residual_lag_when_signal_lag_days_gt_one(tmp_path
     series = signal._load_pred_series(pd.Timestamp("2025-01-03"), pd.Timestamp("2025-01-03"))
 
     assert series is not None
-    assert series.loc[(pd.Timestamp("2025-01-03"), "SH600000")] == 0.1
+    assert series.loc[(pd.Timestamp("2025-01-03"), "sh600000")] == 0.1
 
 
 def test_simple_signal_with_pred_path_returns_empty_when_slice_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
