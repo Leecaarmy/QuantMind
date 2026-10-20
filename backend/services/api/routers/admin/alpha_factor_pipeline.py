@@ -28,6 +28,7 @@ from backend.services.api.user_app.middleware.auth import require_admin
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.user_factor_publish import (
     create_building_generation,
+    describe_custom_user_dataset_state,
     ensure_user_factor_schema,
     get_active_generation,
     list_generations,
@@ -357,6 +358,11 @@ async def _auto_publish_factor(
             raise ValueError(f"因子合并结果为空（non_null={non_null}），拒绝发布")
         min_date, max_date = _frame_date_span(factor_df)
         byte_count = max(1, rows * 8)
+        try:
+            _dir_state = describe_custom_user_dataset_state(_AUTO_PUBLISH_DATASET)
+            _dir_fingerprint = str(_dir_state.get("fingerprint")) if _dir_state else ""
+        except Exception:  # noqa: BLE001
+            _dir_fingerprint = ""
         async with get_session() as session:
             record = await publish_completed_generation(
                 session,
@@ -368,6 +374,7 @@ async def _auto_publish_factor(
                     "factor_name": factor_name,
                     "min_date": min_date,
                     "max_date": max_date,
+                    "fingerprint": _dir_fingerprint,
                 },
             )
             await upsert_discovered_field(

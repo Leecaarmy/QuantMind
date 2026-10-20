@@ -1031,7 +1031,11 @@ def _run_local_scan_job(job_id: str, root: str | None, datasets: list[str] | Non
         with _jobs_lock:
             job = _scan_jobs.get(job_id)
             if job is not None:
-                job.update(status=status, summary=summary, finished_at=_now_iso(), current=None)
+                job.update(
+                    status=status, summary=summary, finished_at=_now_iso(), current=None
+                )
+        if status == "completed":
+            _publish_baseline_after_init(_scan_jobs, job_id, "local-scan")
     except Exception as exc:  # noqa: BLE001
         logger.error("quantdb local-scan job %s failed: %s", job_id, exc, exc_info=True)
         with _jobs_lock:
@@ -1177,6 +1181,33 @@ def _reset_quantdb_runtime_caches() -> None:
         logger.warning("清空个股终端缓存失败（忽略）", exc_info=True)
 
 
+def _publish_baseline_after_init(
+    store: dict[str, dict[str, Any]], job_id: str, source: str
+) -> None:
+    """数据初始化任务成功后做一次用户因子基线发布（幂等跳过也记结果）。
+
+    永不抛错：发布失败只记日志并写进 job 记录，不改变任务本身的终态。
+    """
+    from backend.shared.user_factor_publish import (
+        publish_baseline_after_data_init_sync,
+    )
+
+    try:
+        with _jobs_lock:
+            job = store.get(job_id)
+            started_by = (job or {}).get("started_by") or "admin"
+        summary = publish_baseline_after_data_init_sync(
+            created_by=f"data-init:{source}:{started_by}"[:128],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("初始化后基线发布异常（已忽略）: %s", exc)
+        summary = {"action": "skipped", "reason": "error", "detail": str(exc)[:200]}
+    with _jobs_lock:
+        job = store.get(job_id)
+        if job is not None:
+            job["auto_publish"] = summary
+
+
 def _run_modelscope_init_job(job_id: str, payload: ModelScopeInitRequest) -> None:
     from backend.services.engine.data_platform.modelscope_dataset_sync import (
         init_from_modelscope,
@@ -1250,6 +1281,8 @@ def _run_modelscope_init_job(job_id: str, payload: ModelScopeInitRequest) -> Non
                     finished_at=_now_iso(),
                     current=None,
                 )
+        if status == "completed":
+            _publish_baseline_after_init(_ms_init_jobs, job_id, "modelscope-init")
     except Exception as exc:  # noqa: BLE001
         logger.error("modelscope init job %s failed: %s", job_id, exc, exc_info=True)
         with _jobs_lock:

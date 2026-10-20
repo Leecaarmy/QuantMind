@@ -197,3 +197,122 @@ def test_validators_reject_bad_input():
             raise AssertionError("非法输入应当被拒绝")
         except ValueError:
             pass
+
+
+def _write_custom_partition(root, dt: str, frame) -> None:
+    part = root / f"dt={dt}"
+    part.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(part / "data.parquet", engine="pyarrow", index=False)
+
+
+def _patch_custom_root(monkeypatch, tmp_path):
+    import backend.shared.feature_source as feature_source
+
+    monkeypatch.setattr(
+        feature_source, "user_dataset_dir", lambda dataset="l1_factors": str(tmp_path)
+    )
+
+
+def test_baseline_empty_dir_skipped(monkeypatch, tmp_path):
+    import pandas as pd  # noqa: F401  (环境自带，与业务一致)
+
+    _patch_custom_root(monkeypatch, tmp_path)
+
+    async def _body(sess):
+        summary = await ufp.publish_data_init_baseline(sess)
+        assert summary["action"] == "skipped"
+        assert summary["reason"] == "empty"
+        assert await ufp.get_active_generation(sess) is None
+
+    _run(_body)
+
+
+def test_baseline_publishes_then_idempotent(monkeypatch, tmp_path):
+    import pandas as pd
+
+    _patch_custom_root(monkeypatch, tmp_path)
+    frame = pd.DataFrame(
+        {
+            "symbol": ["600036.SH", "600000.SH"],
+            "date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "alpha_a": [0.1, 0.2],
+            "alpha_b": [1.0, None],
+        }
+    )
+    _write_custom_partition(tmp_path, "20240102", frame)
+    _write_custom_partition(tmp_path, "20240103", frame)
+
+    # 注意：_run 每次建新空库，幂等语义需在同一库内验证，故合并为一次运行
+    async def _combined(sess):
+        summary = await ufp.publish_data_init_baseline(sess)
+        assert summary["action"] == "published"
+        first_count = len(await ufp.list_generations(sess))
+        again = await ufp.publish_data_init_baseline(sess)
+        assert again["action"] == "skipped"
+        assert again["reason"] == "up-to-date"
+        assert len(await ufp.list_generations(sess)) == first_count
+        # 字段发现表已自动登记
+        rows = (
+            (
+                await sess.execute(
+                    text(
+                        "SELECT column_name FROM qm_quantdb_factor_field "
+                        "WHERE market='CUSTOM' AND dataset_id='l1_factors'"
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert {r["column_name"] for r in rows} == {"alpha_a", "alpha_b"}
+
+    _run(_combined)
+
+
+def test_baseline_republishes_on_new_partition(monkeypatch, tmp_path):
+    import pandas as pd
+
+    _patch_custom_root(monkeypatch, tmp_path)
+    frame = pd.DataFrame(
+        {
+            "symbol": ["600036.SH", "600000.SH"],
+            "date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "alpha_a": [0.1, 0.2],
+        }
+    )
+    _write_custom_partition(tmp_path, "20240102", frame)
+
+    async def _body(sess):
+        first = await ufp.publish_data_init_baseline(sess)
+        assert first["action"] == "published"
+        first_active = await ufp.get_active_generation(sess)
+        # 新增分区 → 指纹变化 → 再次发布并归档旧代次
+        frame2 = frame.copy()
+        _write_custom_partition(tmp_path, "20240103", frame2)
+        second = await ufp.publish_data_init_baseline(sess)
+        assert second["action"] == "published"
+        assert second["fingerprint"] != first["fingerprint"]
+        active = await ufp.get_active_generation(sess)
+        assert active["generation_id"] != first_active["generation_id"]
+        statuses = {
+            r["generation_id"]: r["status"] for r in await ufp.list_generations(sess)
+        }
+        assert statuses[first_active["generation_id"]] == "archived"
+
+    _run(_body)
+
+
+def test_describe_state_none_without_factors(monkeypatch, tmp_path):
+    import pandas as pd
+
+    _patch_custom_root(monkeypatch, tmp_path)
+    # 只有键列、没有因子列 → 视为无状态
+    frame = pd.DataFrame(
+        {
+            "symbol": ["600036.SH"],
+            "date": pd.to_datetime(["2024-01-02"]),
+            "close": [10.0],
+        }
+    )
+    _write_custom_partition(tmp_path, "20240102", frame)
+    assert ufp.describe_custom_user_dataset_state() is None

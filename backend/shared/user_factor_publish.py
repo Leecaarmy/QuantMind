@@ -18,22 +18,55 @@ OSS 为单容器部署，无租户隔离与因子任务队列，故做如下简�
 ``create_building_generation`` → 离线计算 + parquet 合并 →
 ``publish_completed_generation``（内含字段注册表 upsert）；
 任一步失败 → ``mark_generation_failed``。
+
+数据初始化（魔搭全量拉取 / 本地扫描）完成后调
+``publish_baseline_after_data_init_sync`` 做一次基线发布：
+把 ``quantcustom`` 现有用户因子列按列建代次并切指针；目录为空或与
+active 指针状态一致时直接跳过（幂等，可重复点初始化）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import text
 
+logger = logging.getLogger(__name__)
+
 DATASET_KEYS = ("l1_factors", "rd_mined")
 DEFAULT_DATASET_KEY = "l1_factors"
 GENERATION_STATUSES = ("building", "published", "failed", "archived")
+
+# 基线发布来源标记（写进 manifest，区别于 promote 触发的代次）。
+BASELINE_SOURCE = "data-init"
+
+# 用户因子目录里不算因子的键列（与 merge/训练侧口径对齐）。
+_BASELINE_KEY_COLUMNS = frozenset(
+    {
+        "symbol",
+        "date",
+        "dt",
+        "trade_date",
+        "datetime",
+        "time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "release_id",
+        "published_at",
+    }
+)
 
 _FEATURE_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
 _GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -398,3 +431,243 @@ async def upsert_discovered_field(
             "now": utcnow_iso(),
         },
     )
+
+
+def describe_custom_user_dataset_state(
+    dataset_key: str = DEFAULT_DATASET_KEY,
+) -> dict[str, Any] | None:
+    """扫描用户因子目录现状（纯本地 IO，无 DB）。
+
+    返回 ``{columns, partitions, fingerprint, min_date, max_date,
+    non_null, latest_rows}``；目录为空或无因子列时返回 None。
+    ``fingerprint`` 是「列集合 + 分区集合 + 总字节」的 sha256，
+    供基线发布做幂等跳过判断。
+    """
+    from backend.shared.feature_source import user_dataset_dir
+
+    dataset = validate_dataset_key(dataset_key)
+    root = Path(user_dataset_dir(dataset))
+    parts = sorted(p for p in root.glob("dt=*/data.parquet") if p.is_file())
+    if not parts:
+        return None
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        logger.warning("pyarrow 不可用，跳过用户因子目录扫描")
+        return None
+    columns: set[str] = set()
+    for part in parts:
+        try:
+            columns |= set(pq.ParquetFile(str(part)).schema_arrow.names)
+        except Exception:  # noqa: BLE001
+            logger.warning("跳过不可读分区: %s", part)
+    feature_columns = sorted(c for c in columns if c not in _BASELINE_KEY_COLUMNS)
+    if not feature_columns:
+        return None
+    dts: list[str] = []
+    total_bytes = 0
+    for part in parts:
+        try:
+            dts.append(part.parent.name.split("=", 1)[1])
+        except IndexError:  # noqa: BLE001
+            continue
+        try:
+            total_bytes += part.stat().st_size
+        except OSError:  # noqa: BLE001
+            continue
+    if not dts:
+        return None
+    dts = sorted(dts)
+    fingerprint = hashlib.sha256(
+        f"{','.join(feature_columns)}|{','.join(dts)}|{total_bytes}".encode()
+    ).hexdigest()
+    non_null: dict[str, int] = {}
+    latest_rows = 0
+    try:
+        import pandas as pd
+
+        latest = pd.read_parquet(parts[-1], engine="pyarrow")
+        latest_rows = int(len(latest))
+        for column in feature_columns:
+            if column in latest.columns:
+                non_null[column] = int(latest[column].notna().sum())
+            else:
+                non_null[column] = 0
+    except Exception:  # noqa: BLE001
+        logger.warning("读取最新分区失败，仅登记列与分区: %s", parts[-1])
+    return {
+        "dataset_key": dataset,
+        "root": str(root),
+        "columns": feature_columns,
+        "partitions": dts,
+        "partition_count": len(dts),
+        "total_bytes": total_bytes,
+        "fingerprint": fingerprint,
+        "min_date": dts[0],
+        "max_date": dts[-1],
+        "non_null": non_null,
+        "latest_rows": latest_rows,
+    }
+
+
+def _manifest_fingerprint(manifest_json: object) -> str | None:
+    try:
+        manifest = json.loads(str(manifest_json or "{}"))
+    except (ValueError, TypeError):
+        return None
+    fingerprint = manifest.get("fingerprint") if isinstance(manifest, dict) else None
+    return str(fingerprint) if fingerprint else None
+
+
+async def _latest_feature_fingerprint(
+    session: Any, dataset_key: str, feature_key: str
+) -> str | None:
+    """该列最近一个 published 代次的指纹（无则 None）。"""
+    row = (
+        (
+            await session.execute(
+                text(
+                    "SELECT manifest_json FROM qm_user_factor_generations "
+                    "WHERE dataset_key = :dataset AND feature_key = :feature "
+                    "AND status = 'published' "
+                    "ORDER BY published_at DESC LIMIT 1"
+                ),
+                {"dataset": dataset_key, "feature": feature_key},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    return _manifest_fingerprint(row["manifest_json"]) if row else None
+
+
+def dataset_state_fingerprint(state: dict[str, Any] | None) -> str | None:
+    """基线/publish 两侧统一的指纹读取（含 promote 时写入的指纹）。"""
+    if not state:
+        return None
+    fingerprint = state.get("fingerprint")
+    return str(fingerprint) if fingerprint else None
+
+
+async def publish_data_init_baseline(
+    session: Any,
+    *,
+    dataset_key: str = DEFAULT_DATASET_KEY,
+    created_by: str = "data-init",
+) -> dict[str, Any]:
+    """数据初始化完成后的基线发布：按列建代次并切指针。
+
+    - 目录为空 / 无因子列 → 跳过（不建代次，指针不动）；
+    - 当前目录指纹与 active 代次一致 → 跳过（幂等，重复点初始化不刷版本）；
+    - 单列失败 → 记 ``failed`` 后继续下一列，不中断、不回滚已发布列。
+    返回 ``{action, published, skipped_unchanged, skipped_empty, failed, ...}``。
+    """
+    dataset = validate_dataset_key(dataset_key)
+    state = await asyncio.to_thread(describe_custom_user_dataset_state, dataset)
+    if not state:
+        return {
+            "action": "skipped",
+            "reason": "empty",
+            "detail": "用户因子目录为空或无因子列，未发布",
+        }
+    fingerprint = str(state["fingerprint"])
+    active = await get_active_generation(session, dataset)
+    if active and _manifest_fingerprint(active.get("manifest_json")) == fingerprint:
+        return {
+            "action": "skipped",
+            "reason": "up-to-date",
+            "detail": "目录状态与 active 代次一致，未发布",
+            "fingerprint": fingerprint,
+            "active_generation_id": active.get("generation_id"),
+        }
+    published: list[str] = []
+    skipped_unchanged: list[str] = []
+    skipped_empty: list[str] = []
+    failed: list[dict[str, str]] = []
+    non_null = state.get("non_null") or {}
+    for column in state["columns"]:
+        rows = int(non_null.get(column, 0))
+        if rows <= 0:
+            skipped_empty.append(column)
+            continue
+        if await _latest_feature_fingerprint(session, dataset, column) == fingerprint:
+            skipped_unchanged.append(column)
+            continue
+        generation_id = new_generation_id()
+        try:
+            await create_building_generation(
+                session,
+                generation_id=generation_id,
+                dataset_key=dataset,
+                feature_key=column,
+                factor_name=column,
+                expression="",
+                created_by=str(created_by or "data-init")[:128],
+            )
+            await publish_completed_generation(
+                session,
+                generation_id=generation_id,
+                dataset_key=dataset,
+                row_count=rows,
+                byte_count=max(1, rows * 8),
+                manifest_extra={
+                    "source": BASELINE_SOURCE,
+                    "fingerprint": fingerprint,
+                    "partitions": state["partition_count"],
+                    "min_date": state["min_date"],
+                    "max_date": state["max_date"],
+                },
+            )
+            await upsert_discovered_field(
+                session,
+                column=column,
+                market="CUSTOM",
+                dataset_id=dataset,
+                min_date=state["min_date"],
+                max_date=state["max_date"],
+            )
+            published.append(column)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                await mark_generation_failed(session, generation_id, error=str(exc))
+            except Exception:  # noqa: BLE001
+                logger.warning("基线发布标记失败状态异常: %s", generation_id)
+            failed.append({"column": column, "error": str(exc)[:300]})
+    return {
+        "action": "published" if published else "skipped",
+        "reason": "baseline",
+        "published": published,
+        "skipped_unchanged": skipped_unchanged,
+        "skipped_empty": skipped_empty,
+        "failed": failed,
+        "fingerprint": fingerprint,
+        "min_date": state["min_date"],
+        "max_date": state["max_date"],
+        "partition_count": state["partition_count"],
+    }
+
+
+def publish_baseline_after_data_init_sync(
+    *,
+    dataset_key: str = DEFAULT_DATASET_KEY,
+    created_by: str = "data-init",
+) -> dict[str, Any]:
+    """同步包装，供初始化后台线程调用；永不抛错（失败只记日志+返回）。"""
+    try:
+        from backend.shared.database_manager_v2 import get_session
+    except ImportError as exc:
+        logger.warning("基线发布跳过（DB 模块不可用）: %s", exc)
+        return {"action": "skipped", "reason": "no-db", "detail": str(exc)[:200]}
+
+    async def _main() -> dict[str, Any]:
+        async with get_session() as session:
+            await ensure_user_factor_schema(session)
+            return await publish_data_init_baseline(
+                session, dataset_key=dataset_key, created_by=created_by
+            )
+
+    try:
+        return asyncio.run(_main())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("数据初始化后基线发布失败（不影响初始化结果）: %s", exc)
+        return {"action": "skipped", "reason": "error", "detail": str(exc)[:300]}
