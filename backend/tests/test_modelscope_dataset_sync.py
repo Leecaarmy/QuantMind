@@ -161,6 +161,48 @@ def test_local_breakdown(tmp_path):
     assert ms._local_breakdown(tmp_path, [remote, missing, changed]) == (32, 8, 16)
 
 
+def test_scan_local_one_pass_matches_split_and_breakdown(tmp_path):
+    content = b"x" * 32
+    remote = ms.RemoteFile(
+        path="1_kline_data/daily_forward/dt=20260101/data.parquet",
+        size=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+        dataset="daily_forward",
+        layout="v2_daily_partition",
+    )
+    changed = ms.RemoteFile(
+        path="1_kline_data/daily_forward/dt=20260103/data.parquet",
+        size=16,
+        sha256="stale",
+        dataset="daily_forward",
+        layout="v2_daily_partition",
+    )
+    missing = ms.RemoteFile(
+        path="1_kline_data/daily_forward/dt=20260102/data.parquet",
+        size=8,
+        sha256="",
+        dataset="daily_forward",
+        layout="v2_daily_partition",
+    )
+    target = tmp_path / remote.path
+    target.parent.mkdir(parents=True)
+    target.write_bytes(content)
+    stale = tmp_path / changed.path
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"y")
+
+    state = {remote.path: remote.sha256, changed.path: "stale"}
+    skippable, present, missing_bytes, changed_bytes = ms._scan_local(
+        tmp_path, [remote, changed, missing], state
+    )
+    assert [f.path for f in skippable] == [remote.path]
+    assert (present, missing_bytes, changed_bytes) == (32, 8, 16)
+
+    # 状态库 sha 不一致 → 即使本地 size 相同也不能跳过
+    skippable, *_ = ms._scan_local(tmp_path, [remote], {remote.path: "other"})
+    assert skippable == []
+
+
 # ---------------------------------------------------------------------------
 # list_remote_files
 # ---------------------------------------------------------------------------
@@ -194,6 +236,55 @@ def test_list_remote_files_paginates_and_dedupes(monkeypatch):
     ]
     assert files[0].dataset == "daily_forward"
     assert files[1].dataset == "income"
+
+
+def test_list_remote_files_fetches_remaining_pages_concurrently(monkeypatch):
+    """TotalCount > 单页大小时，首屏后其余页并发拉取且不丢条目。"""
+    monkeypatch.setattr(ms, "TREE_PAGE_SIZE", 2)
+    monkeypatch.setattr(ms, "TREE_WORKERS", 2)
+    pages = [
+        {
+            "Code": 200,
+            "Data": {
+                "TotalCount": 5,
+                "Files": [
+                    _blob("1_kline_data/daily_forward/dt=20260101/data.parquet", b"a"),
+                    {"Type": "tree", "Path": "1_kline_data/daily_forward"},
+                ],
+            },
+        },
+        {
+            "Code": 200,
+            "Data": {
+                "TotalCount": 5,
+                "Files": [
+                    _blob("1_kline_data/daily_forward/dt=20260102/data.parquet", b"bb"),
+                    _blob("3_financial_data/income/000001.SZ.parquet", b"ccc"),
+                ],
+            },
+        },
+        {
+            "Code": 200,
+            "Data": {
+                "TotalCount": 5,
+                "Files": [
+                    _blob("6_ml_datasets/l1_factors/dt=20260101/data.parquet", b"dddd")
+                ],
+            },
+        },
+    ]
+    _FakeClient.tree_pages = pages
+    _FakeClient.payloads = {}
+    monkeypatch.setattr(ms.httpx, "Client", _FakeClient)
+
+    progress: list[tuple[int, int]] = []
+    files = ms.list_remote_files(
+        endpoint="https://example.test",
+        repo_id="ns/repo",
+        progress_cb=lambda _stage, done, total: progress.append((done, total)),
+    )
+    assert len(files) == 4
+    assert progress[-1] == (5, 5)
 
 
 # ---------------------------------------------------------------------------
