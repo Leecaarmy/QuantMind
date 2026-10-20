@@ -26,6 +26,17 @@ from sqlalchemy import text
 
 from backend.services.api.user_app.middleware.auth import require_admin
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.user_factor_publish import (
+    create_building_generation,
+    ensure_user_factor_schema,
+    get_active_generation,
+    list_generations,
+    mark_generation_failed,
+    new_generation_id,
+    publish_completed_generation,
+    upsert_discovered_field,
+    validate_dataset_key,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -281,6 +292,104 @@ async def register_feature_in_catalog(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 自动发布（企业版 generation 语义下放：建代次 → 合并 → 原子发布切指针）
+# ═══════════════════════════════════════════════════════════════════
+
+_AUTO_PUBLISH_DATASET = "l1_factors"
+_AUTO_PUBLISH_CREATED_BY = "api:alpha_factor_pipeline"
+
+
+def _frame_date_span(factor_df: pd.DataFrame) -> tuple[str | None, str | None]:
+    """从因子帧提取日期上下界（`YYYY-MM-DD`），供字段发现表登记。"""
+    try:
+        dates = None
+        if isinstance(factor_df.index, pd.MultiIndex):
+            for name in ("datetime", "date", "trade_date"):
+                if name in factor_df.index.names:
+                    dates = pd.to_datetime(
+                        factor_df.index.get_level_values(name), errors="coerce"
+                    )
+                    break
+        for col in ("trade_date", "date", "datetime"):
+            if dates is None and col in factor_df.columns:
+                dates = pd.to_datetime(factor_df[col], errors="coerce")
+                break
+        if dates is None:
+            return None, None
+        dates = dates.dropna()
+        if len(dates) == 0:
+            return None, None
+        return (
+            str(dates.min().date()),
+            str(dates.max().date()),
+        )
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+async def _auto_publish_factor(
+    *,
+    feature_key: str,
+    factor_name: str,
+    expression: str,
+    factor_df: pd.DataFrame,
+    non_null: int,
+) -> dict[str, Any]:
+    """合并成功后自动发布一代次；失败抛错前已记 ``failed``，指针不动。
+
+    返回 publish 记录（含 ``generation_id``）。调用方捕获异常后记入 errors。
+    """
+    generation_id = new_generation_id()
+    async with get_session() as session:
+        await ensure_user_factor_schema(session)
+        await create_building_generation(
+            session,
+            generation_id=generation_id,
+            dataset_key=_AUTO_PUBLISH_DATASET,
+            feature_key=feature_key,
+            factor_name=factor_name,
+            expression=expression,
+            created_by=_AUTO_PUBLISH_CREATED_BY,
+        )
+    try:
+        rows = int(non_null)
+        if rows <= 0:
+            raise ValueError(f"因子合并结果为空（non_null={non_null}），拒绝发布")
+        min_date, max_date = _frame_date_span(factor_df)
+        byte_count = max(1, rows * 8)
+        async with get_session() as session:
+            record = await publish_completed_generation(
+                session,
+                generation_id=generation_id,
+                dataset_key=_AUTO_PUBLISH_DATASET,
+                row_count=rows,
+                byte_count=byte_count,
+                manifest_extra={
+                    "factor_name": factor_name,
+                    "min_date": min_date,
+                    "max_date": max_date,
+                },
+            )
+            await upsert_discovered_field(
+                session,
+                column=feature_key,
+                market="CUSTOM",
+                dataset_id=_AUTO_PUBLISH_DATASET,
+                min_date=min_date,
+                max_date=max_date,
+            )
+        return record
+    except Exception as exc:  # noqa: BLE001
+        async with get_session() as session:
+            try:
+                await ensure_user_factor_schema(session)
+                await mark_generation_failed(session, generation_id, error=str(exc))
+            except Exception:  # noqa: BLE001
+                logger.warning("标记代次失败状态异常: %s", generation_id)
+        raise
+
+
+# ═══════════════════════════════════════════════════════════════════
 # API 端点
 # ═══════════════════════════════════════════════════════════════════
 
@@ -354,15 +463,39 @@ async def promote_factors(req: PromoteRequest):
                 formula=expression,
             )
 
-            promoted.append({
-                "factor_id": factor_id,
-                "factor_name": factor_name,
-                "feature_key": feature_key,
-                "expression": expression,
-                "non_null_values": non_null,
-                "ic_value": factor.get("ic_value"),
-                "sharpe_ratio": factor.get("sharpe_ratio"),
-            })
+            # 6. auto-publish a generation (failed publish keeps old pointer)
+            try:
+                publish_record = await _auto_publish_factor(
+                    feature_key=feature_key,
+                    factor_name=factor_name,
+                    expression=expression,
+                    factor_df=factor_df,
+                    non_null=non_null,
+                )
+                generation_id = str(publish_record.get("generation_id") or "")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("auto-publish failed for %s: %s", factor_name, exc)
+                errors.append(
+                    {
+                        "factor_id": factor_id,
+                        "factor_name": factor_name,
+                        "error": f"auto-publish failed: {exc}",
+                    }
+                )
+                continue
+
+            promoted.append(
+                {
+                    "factor_id": factor_id,
+                    "factor_name": factor_name,
+                    "feature_key": feature_key,
+                    "expression": expression,
+                    "non_null_values": non_null,
+                    "ic_value": factor.get("ic_value"),
+                    "sharpe_ratio": factor.get("sharpe_ratio"),
+                    "generation_id": generation_id,
+                }
+            )
 
         except Exception:
             logger.exception("Failed to promote factor %s", factor_name)
@@ -463,12 +596,32 @@ async def promote_factors_by_expression(req: PromoteExpressionRequest):
                 feature_name=factor_name,
                 formula=expression,
             )
-            promoted.append({
-                "factor_name": factor_name,
-                "feature_key": feature_key,
-                "expression": expression,
-                "non_null_values": non_null,
-            })
+            # auto-publish a generation (failed publish keeps old pointer)
+            try:
+                publish_record = await _auto_publish_factor(
+                    feature_key=feature_key,
+                    factor_name=factor_name,
+                    expression=expression,
+                    factor_df=factor_df,
+                    non_null=non_null,
+                )
+                generation_id = str(publish_record.get("generation_id") or "")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("auto-publish failed for %s: %s", factor_name, exc)
+                errors.append(
+                    {"factor_name": factor_name, "error": f"auto-publish failed: {exc}"}
+                )
+                continue
+
+            promoted.append(
+                {
+                    "factor_name": factor_name,
+                    "feature_key": feature_key,
+                    "expression": expression,
+                    "non_null_values": non_null,
+                    "generation_id": generation_id,
+                }
+            )
         except Exception:
             logger.exception("Failed to promote factor %s", factor_name)
             errors.append({"factor_name": factor_name, "error": "因子推广失败"})
@@ -479,3 +632,27 @@ async def promote_factors_by_expression(req: PromoteExpressionRequest):
         errors=errors,
         auto_train_triggered=False,
     )
+
+
+@router.get("/generations/active")
+async def get_active_user_factor_generation_endpoint(
+    dataset: str = "l1_factors",
+):
+    """查询用户因子数据集当前自动发布的 active 代次（训练侧可信版本）。"""
+    dataset_key = validate_dataset_key(dataset)
+    async with get_session() as session:
+        await ensure_user_factor_schema(session)
+        record = await get_active_generation(session, dataset_key)
+    return {"dataset_key": dataset_key, "active": record}
+
+
+@router.get("/generations")
+async def list_user_factor_generation_endpoint(
+    dataset: str | None = None,
+    limit: int = 50,
+):
+    """按时间倒序列出用户因子数据集代次（含 building/failed，便于排障）。"""
+    async with get_session() as session:
+        await ensure_user_factor_schema(session)
+        records = await list_generations(session, dataset, limit)
+    return {"generations": records, "total": len(records)}

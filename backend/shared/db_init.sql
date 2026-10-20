@@ -2657,6 +2657,41 @@ EXCEPTION WHEN OTHERS THEN
 END $$;
 
 -- ========================
+-- 67. QM_USER_FACTOR_GENERATIONS 用户因子训练数据集自动发布（generation + active 指针）
+-- ========================
+-- 企业版 alpha_user_factor_generations / alpha_user_factor_dataset_active 语义的
+-- OSS 下放：promote 成功后自动建代次并切换指针，失败不切换；训练侧只读指针。
+-- OSS 单容器无租户隔离与因子任务队列，故不分 tenant/user、不外键 alpha_factor_jobs。
+-- 存量库靠 data/upgrade_v1.0.15.sql 拉齐（与本节同 DDL，幂等可重放）。
+CREATE TABLE IF NOT EXISTS qm_user_factor_generations (
+    generation_id   TEXT PRIMARY KEY,
+    dataset_key     TEXT NOT NULL DEFAULT 'l1_factors',
+    status          TEXT NOT NULL DEFAULT 'building',
+    feature_key     TEXT NOT NULL,
+    factor_name     TEXT NOT NULL DEFAULT '',
+    expression_sha256 TEXT NOT NULL DEFAULT '',
+    manifest_json   TEXT NOT NULL DEFAULT '{}',
+    row_count       INTEGER NOT NULL DEFAULT 0,
+    byte_count      INTEGER NOT NULL DEFAULT 0,
+    error_message   TEXT NOT NULL DEFAULT '',
+    created_by      TEXT NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    published_at    TIMESTAMPTZ,
+    CHECK (dataset_key IN ('l1_factors', 'rd_mined')),
+    CHECK (status IN ('building', 'published', 'failed', 'archived'))
+);
+
+CREATE TABLE IF NOT EXISTS qm_user_factor_dataset_active (
+    dataset_key     TEXT PRIMARY KEY,
+    generation_id   TEXT NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (dataset_key IN ('l1_factors', 'rd_mined'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_qm_user_factor_generations_ds_status
+    ON qm_user_factor_generations (dataset_key, status, created_at DESC);
+
+-- ========================
 -- DONE - 所有缺失表已创建
 -- ========================
 -- 注：后续增量补丁不再进第 66 节，一律新建 data/upgrade_vX.Y.Z.sql
