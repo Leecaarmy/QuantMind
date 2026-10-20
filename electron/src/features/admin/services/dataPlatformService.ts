@@ -777,7 +777,7 @@ class DataPlatformService {
     async modelscopePreflight(datasets?: string[]): Promise<QuantDBModelScopePreflight> {
         const resp = await this.axiosInstance.get('/admin/data-platform/quantdb/modelscope/preflight', {
             params: datasets && datasets.length ? { datasets: datasets.join(',') } : undefined,
-            timeout: 180000, // 预检需枚举远端数万个文件
+            timeout: 300000, // 预检需枚举远端数万个文件
         });
         return this.unwrap(resp);
     }
