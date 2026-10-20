@@ -176,13 +176,11 @@ function createWindow() {
     show: false,
     width: 1440,
     height: 1000,
-    minWidth: 1440,
-    minHeight: 1000,
-    maxWidth: 1440,
-    maxHeight: 1000,
-    resizable: false,
-    maximizable: false,
-    fullscreenable: false,
+    // macOS 解锁窗口尺寸（小屏下底部内容被固定高度裁掉），启动最大化；
+    // Windows/Linux 维持原 1440×1000 固定窗口（自定义 TitleBar 按固定尺寸设计）
+    ...(process.platform === 'darwin'
+      ? { minWidth: 1280, minHeight: 800, resizable: true, maximizable: true, fullscreenable: true }
+      : { minWidth: 1440, minHeight: 1000, maxWidth: 1440, maxHeight: 1000, resizable: false, maximizable: false, fullscreenable: false }),
     minimizable: true,
     closable: true,
     frame: false, // 全平台使用无边框，Windows 依赖自定义 TitleBar
@@ -353,6 +351,9 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     isWindowReadyToShow = true;
+    if (process.platform === 'darwin') {
+      try { mainWindow.maximize(); } catch { /* 忽略个别平台 maximize 异常 */ }
+    }
     tryShowWindow();
   });
 
