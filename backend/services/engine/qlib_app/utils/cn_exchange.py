@@ -38,6 +38,7 @@ class CnExchange(Exchange):
         impact_cost_coefficient: float = 0.0005,  # 市场冲击成本系数（与 Schema 默认值保持一致）
         backtest_id: str | None = None,  # 新增 backtest_id 用于关联交易记录
         allow_short_selling: bool = False,
+        max_participation_rate: float | None = None,  # 单笔成交占当日量上限（默认 5%，防 75% 一口吃）
         **kwargs,
     ):
         # Ref uses the trading calendar, not a wall-clock lookback. Dividing this
@@ -55,6 +56,14 @@ class CnExchange(Exchange):
         self.impact_cost_coefficient = impact_cost_coefficient
         self.backtest_id = backtest_id
         self.allow_short_selling = bool(allow_short_selling)
+        if max_participation_rate is None:
+            try:
+                import os
+
+                max_participation_rate = float(os.getenv("QLIB_MAX_PARTICIPATION_RATE", "0.05"))
+            except Exception:
+                max_participation_rate = 0.05
+        self.max_participation_rate = float(max_participation_rate or 0.05)
 
         # Redis client for logging trades
         self.redis_client = None
@@ -302,6 +311,26 @@ class CnExchange(Exchange):
 
         return amount
 
+    _ST_SYMBOLS_CACHE: frozenset | None = None
+
+    @classmethod
+    def _resolve_is_st(cls, stock_id: str) -> bool:
+        """尽力判定 ST（快照口径，失败回 False）。
+
+        instrument_detail 是单一快照，历史回放会沿用该快照：对 2024 年老
+        ST 可能误判，但比永远 False 更能堵住当前 ST 5% 板一字买入。
+        """
+        try:
+            if cls._ST_SYMBOLS_CACHE is None:
+                from backend.services.simulation.services.local_market_data import (
+                    get_local_market_data,
+                )
+
+                cls._ST_SYMBOLS_CACHE = frozenset(get_local_market_data("CN").st_symbols())
+            return StockCodeUtil.to_suffix(stock_id) in (cls._ST_SYMBOLS_CACHE or frozenset())
+        except Exception:
+            return False
+
     @staticmethod
     def _get_limit_threshold(stock_id: str, trade_date=None) -> float:
         """Use the shared dated board rules (including historical ChiNext/BSE)."""
@@ -309,7 +338,11 @@ class CnExchange(Exchange):
 
         day = pd.Timestamp(trade_date or datetime.now()).date()
         return float(
-            limit_pct(StockCodeUtil.to_suffix(stock_id), is_st=False, trade_date=day)
+            limit_pct(
+                StockCodeUtil.to_suffix(stock_id),
+                is_st=CnExchange._resolve_is_st(stock_id),
+                trade_date=day,
+            )
         )
 
     def check_stock_limit(
@@ -352,7 +385,7 @@ class CnExchange(Exchange):
             upper, lower = compute_limits(
                 symbol,
                 reference,
-                is_st=False,
+                is_st=self._resolve_is_st(stock_id),
                 trade_date=pd.Timestamp(start_time).date(),
             )
             # Qlib stores float32 adjusted quotes. Compare raw cents with a
@@ -412,6 +445,25 @@ class CnExchange(Exchange):
         order.factor = self.get_factor(order.stock_id, order.start_time, order.end_time)
         order.deal_amount = order.amount
         self._clip_amount_by_volume(order, dealt_order_amount)
+
+        # 容量硬约束：单笔不超过当日量 max_participation_rate（默认 5%）。
+        # 之前仅告警不断单，导致 75% 一口吃仍全额成交；此处直接截断，余量视为缺口。
+        try:
+            if market_volume is not None and float(market_volume) > 0 and self.max_participation_rate > 0:
+                cap = float(market_volume) * float(self.max_participation_rate)
+                if order.deal_amount > cap:
+                    task_logger.info(
+                        "clip_by_participation",
+                        "Clip order by participation cap",
+                        stock_id=str(order.stock_id),
+                        start_time=str(order.start_time),
+                        requested=float(order.deal_amount),
+                        capped=float(cap),
+                        market_volume=float(market_volume),
+                    )
+                    order.deal_amount = float(cap)
+        except Exception:
+            pass
 
         # Cash / Position limit clipping
         if order.direction == Order.SELL:
