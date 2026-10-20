@@ -114,6 +114,25 @@ def test_truncate_orders_never_drops_sells():
     assert all(o.side == "SELL" for o in kept)
 
 
+def test_resolve_max_orders_build_raises_limit_to_topk():
+    """建仓轮上限低于 topk 时抬到 topk，否则账户永久少配。"""
+    assert SimulationEngine._resolve_max_orders(20, topk=50, is_build=True) == 50
+
+
+def test_resolve_max_orders_build_keeps_larger_explicit_limit():
+    assert SimulationEngine._resolve_max_orders(80, topk=50, is_build=True) == 80
+
+
+def test_resolve_max_orders_rebalance_honours_explicit_limit():
+    """日常调仓不改写用户显式设置的限流值。"""
+    assert SimulationEngine._resolve_max_orders(20, topk=50, is_build=False) == 20
+
+
+def test_resolve_max_orders_unset_means_no_truncation():
+    assert SimulationEngine._resolve_max_orders(None, topk=50, is_build=True) == 0
+    assert SimulationEngine._resolve_max_orders(0, topk=50, is_build=True) == 0
+
+
 # ── 3. 空转判失败 ────────────────────────────────────────────────────────
 
 

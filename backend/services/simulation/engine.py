@@ -312,6 +312,7 @@ class SimulationEngine:
                 None 时若 run_id 以 bootstrap_ 开头则自动开启
             max_orders: 单轮订单数上限（对应 live_trade_config.max_orders_per_cycle）。
                 卖单（减仓/风控）优先且不占额度，买入超出部分被丢弃。
+                建仓轮（当前无持仓）上限不会低于策略 topk，避免账户永久少配。
 
         Returns:
             执行报告
@@ -507,8 +508,13 @@ class SimulationEngine:
                 orders = self._apply_max_buy_drop_gate(
                     orders, live_ticks=live_ticks, tenant=tenant, user_id=uid
                 )
-                if max_orders is not None and int(max_orders) > 0:
-                    orders = self._truncate_orders(orders, int(max_orders))
+                effective_max_orders = self._resolve_max_orders(
+                    max_orders,
+                    topk=int(getattr(strategy_config, "topk", 0) or 0),
+                    is_build=not position_symbols,
+                )
+                if effective_max_orders > 0:
+                    orders = self._truncate_orders(orders, effective_max_orders)
                 report.order_count = len(orders)
 
                 # 闸门风控（管理后台 risk_rules）：规则只加载一次，逐单评估。
@@ -1225,6 +1231,39 @@ class SimulationEngine:
                 ",".join(dropped[:20]),
             )
         return kept
+
+    @staticmethod
+    def _resolve_max_orders(
+        max_orders: int | None,
+        *,
+        topk: int,
+        is_build: bool,
+    ) -> int:
+        """解析本轮实际使用的单轮订单上限；返回 0 表示不截断。
+
+        ``max_orders_per_cycle`` 的历史默认值是 20，而策略 topk 可以是 50。
+        建仓轮（当前无持仓）必须一次性买满 topk，若仍按 20 截断，账户会
+        永远停在 20 只：TopkDropout 只在「剔除」时等量新增
+        （见 RebalanceCalculator._select_topk_dropout），持仓全部留在
+        topk 内时不会补仓，策略目标仓位被默认值悄悄改写。
+
+        因此建仓轮把上限抬到 topk（用户显式设得更大则保留）；日常调仓
+        仍严格按配置截断，保留限流风控语义。
+        """
+        try:
+            limit = int(max_orders or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit <= 0:
+            return 0
+        if is_build and topk > limit:
+            logger.info(
+                "SimulationEngine: 建仓轮单轮上限 %d → topk=%d（否则账户会永久少配）",
+                limit,
+                topk,
+            )
+            return topk
+        return limit
 
     @staticmethod
     def _truncate_orders(orders: list[Order], max_orders: int) -> list[Order]:
