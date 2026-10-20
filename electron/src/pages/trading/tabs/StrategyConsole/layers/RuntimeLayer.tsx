@@ -90,21 +90,10 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
     const task = status?.latest_hosted_task || null;
     const nextTrigger = status?.next_trigger || null;
     const result = (task?.result_json || {}) as Record<string, unknown>;
-    const request = (task?.request_json || {}) as Record<string, unknown>;
     const preview = (result?.preview_summary || {}) as Record<string, unknown>;
-    const execWindow = (request?.execution_window || {}) as Record<string, string | undefined>;
     const success = Number(task?.success_count ?? (result?.success_count as number) ?? 0);
     const failed = Number(task?.failed_count ?? (result?.failed_count as number) ?? 0);
     const skipped = Number(preview?.skipped_count ?? 0);
-    const rawHorizon = (task as unknown as Record<string, unknown> | null)?.target_horizon_days
-        ?? request?.target_horizon_days
-        ?? result?.target_horizon_days
-        ?? preview?.target_horizon_days;
-    const horizon = typeof rawHorizon === 'number' && Number.isFinite(rawHorizon) && rawHorizon > 0
-        ? rawHorizon
-        : (typeof rawHorizon === 'string' && rawHorizon.trim() !== '' && Number.isFinite(Number(rawHorizon)) && Number(rawHorizon) > 0
-            ? Number(rawHorizon)
-            : undefined);
 
     return (
         <section className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-4">
@@ -184,16 +173,6 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                                     <div className="flex justify-between gap-3 items-center bg-white rounded-xl border border-slate-100 px-3.5 py-2.5">
                                         <span className="text-slate-400 font-semibold text-xs" title="策略实际买卖节奏：策略代码优先，没写才用启动器选择">调仓周期</span>
                                         <span className="text-sm font-black text-slate-800">{scheduleText}</span>
-                                    </div>
-                                    <div className="flex justify-between gap-3 items-center bg-white rounded-xl border border-slate-100 px-3.5 py-2.5">
-                                        <span className="text-slate-400 font-semibold text-xs" title="本批模型信号的有效天数，只决定信号用到哪天，不决定买卖节奏">信号有效期</span>
-                                        <span className="text-sm font-black text-slate-800">{horizon ? `${horizon} 个交易日` : '-'}</span>
-                                    </div>
-                                    <div className="flex justify-between gap-3 items-center bg-white rounded-xl border border-slate-100 px-3.5 py-2.5">
-                                        <span className="text-slate-400 font-semibold text-xs" title="本批信号可执行的时间范围，过期需等新一批推理">信号窗口</span>
-                                        <span className="text-xs font-bold text-slate-800 truncate text-right" title={`${execWindow?.start || '-'} ~ ${execWindow?.end || '-'}`}>
-                                            {execWindow?.start || '-'} ~ {execWindow?.end || '-'}
-                                        </span>
                                     </div>
                                     <div className="flex justify-between gap-3 items-center bg-white rounded-xl border border-slate-100 px-3.5 py-2.5">
                                         <span className="text-slate-400 font-semibold text-xs">信号批次</span>
