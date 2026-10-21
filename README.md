@@ -307,6 +307,24 @@ docker exec qwenpaw qwenpaw channels send
 
 ## 本地开发
 
+### 选择代码分支
+
+- `master`：稳定分支，适合日常部署和体验。
+- `next`：开发预览分支，适合参与开发或提前体验尚未合入稳定分支的变更。
+
+克隆开发预览分支：
+
+```bash
+git clone -b next https://gitee.com/qusong0627/quantmind.git
+```
+
+已有仓库切换到开发预览分支：
+
+```bash
+git fetch origin
+git switch next
+```
+
 ```bash
 # 1. 后端单元测试
 python backend/run_tests.py unit

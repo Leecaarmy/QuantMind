@@ -106,7 +106,7 @@ npm run dashboard:build  # 生产环境构建
 # 1. 本地提交并推送
 git add .
 git commit -m "descriptive message"
-git push gitee NEXT
+git push gitee master
 
 # 2. 同步并重启后端服务（服务名见 docker compose config --services）
 # 注意：目标服务器的 SSH 别名/主机与项目目录因人而异，部署前先向用户询问确认。
